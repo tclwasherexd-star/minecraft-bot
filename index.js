@@ -52,3 +52,63 @@ const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('AFK Bot is running 24/7'));
 app.listen(process.env.PORT || 3000);
+
+    // ========================================================
+    // CUSTOM IN-GAME COMMAND SYSTEM
+    // ========================================================
+    bot.on('chat', (username, message) => {
+        // Ignore messages sent by the bot itself to prevent infinite loops
+        if (username === bot.username) return;
+
+        // Command: !help
+        if (message === '!help') {
+            bot.chat(`Hello ${username}! Available commands: !coords, !jump, !status, !drop, !talk [msg]`);
+        }
+
+        // Command: !coords (Tells everyone the bot's position)
+        if (message === '!coords') {
+            const p = bot.entity.position;
+            bot.chat(`I am at X: ${Math.round(p.x)}, Y: ${Math.round(p.y)}, Z: ${Math.round(p.z)}`);
+        }
+
+        // Command: !jump (Makes the bot jump on demand)
+        if (message === '!jump') {
+            bot.chat('Jumping!');
+            bot.setControlState('jump', true);
+            setTimeout(() => bot.setControlState('jump', false), 500);
+        }
+
+        // Command: !status (Checks bot health and food stats)
+        if (message === '!status') {
+            bot.chat(`Health: ${bot.health}/20 | Food: ${bot.food}/20`);
+        }
+
+        // NEW Command: !talk [message] (Makes the bot repeat what you say)
+        if (message.startsWith('!talk ')) {
+            const textToSay = message.replace('!talk ', '');
+            bot.chat(textToSay);
+        }
+
+        // NEW Command: !drop (Makes the bot drop its inventory items)
+        if (message === '!drop') {
+            const items = bot.inventory.items();
+            if (items.length === 0) {
+                bot.chat("My inventory is empty!");
+                return;
+            }
+            bot.chat("Dropping all my items!");
+            
+            // Function to drop items one by one safely
+            async function dropAll() {
+                for (const item of items) {
+                    try {
+                        await bot.tossStack(item);
+                    } catch (err) {
+                        console.log(`Error dropping item: ${err.message}`);
+                    }
+                }
+            }
+            dropAll();
+        }
+    });
+    // ========================================================
