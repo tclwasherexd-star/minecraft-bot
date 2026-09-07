@@ -6,7 +6,7 @@ const app = express();
 const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
 // --- SECURITY ADMIN CONFIGURATION ---
-const myUsername = 'YOUR_MINECRAFT_NAME'; // 🔴 REPLACE WITH YOUR EXACT IN-GAME NAME!
+const myUsername = 'tcl'; // 🔴 REPLACE WITH YOUR EXACT IN-GAME NAME!
 const useAuthPlugin = true, accountPassword = 'YourBotPassword123';
 let bot, customCommands = {};
 
