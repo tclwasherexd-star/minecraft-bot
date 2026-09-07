@@ -32,6 +32,15 @@ function createBot() {
       }, 2000);
     }
 
+    // AUTO-JUMP: Always keep jump control active when moving
+    setInterval(() => {
+      if (bot.pathfinder.isMoving() && !attachTarget) {
+        bot.setControlState('jump', true);
+      } else {
+        bot.setControlState('jump', false);
+      }
+    }, 100);
+
     // Smooth Riding Loop - Fixed for attacking
     setInterval(() => {
       if (attachTarget) {
@@ -44,14 +53,6 @@ function createBot() {
         }
       }
     }, 50);
-
-    // Anti-AFK Jump Loop
-    setInterval(() => {
-      if (!bot.pathfinder.isMoving() && !attachTarget && !wanderMode) {
-        bot.setControlState('jump', true);
-        setTimeout(() => bot.setControlState('jump', false), 500);
-      }
-    }, 30000);
 
     // Protect Mode Loop
     setInterval(() => {
@@ -102,7 +103,7 @@ function createBot() {
       bot.pathfinder.setGoal(new goals.GoalNear(origin.x + dx, origin.y, origin.z + dz, 1));
     }, 8000);
 
-    // Stuck Detector - jumps + pushes forward if bot has an active goal but isn't progressing
+    // Stuck Detector - Immediately jumps and pushes forward if stuck
     let lastPos = null;
     let stuckTicks = 0;
     setInterval(() => {
@@ -112,19 +113,22 @@ function createBot() {
       const pos = bot.entity.position;
       if (lastPos && pos.distanceTo(lastPos) < 0.15) {
         stuckTicks++;
-        if (stuckTicks >= 1) {
-          bot.setControlState('forward', true);
-          bot.setControlState('jump', true);
-          setTimeout(() => {
-            bot.setControlState('jump', false);
-          }, 300);
-        }
+        // Immediately jump and move forward when stuck
+        bot.setControlState('forward', true);
+        bot.setControlState('jump', true);
+        // Keep jumping continuously while stuck
+        setTimeout(() => {
+          if (bot.pathfinder.isMoving()) {
+            bot.setControlState('jump', true);
+          }
+        }, 50);
       } else {
         stuckTicks = 0;
         bot.setControlState('forward', false);
+        // Auto-jump stays on due to the main auto-jump loop
       }
       lastPos = pos.clone();
-    }, 500);
+    }, 100);
   });
 
   bot.on('message', (jsonMsg) => {
@@ -212,16 +216,13 @@ function createBot() {
       return;
     }
 
-    // FIXED: !follow command - properly handles both with and without player argument
     if (command === '!follow') {
       attachTarget = null; 
       attachType = null;
       attackTarget = null;
       
-      // Check if a player name was provided as argument
       const targetName = args[1] || username;
       
-      // Verify the target player exists
       if (!bot.players[targetName]) {
         return bot.whisper(username, `Player ${targetName} not found or offline.`);
       }
@@ -337,7 +338,6 @@ function createBot() {
       return;
     }
 
-    // FIXED: !attachplayer command - properly attaches AND attacks the player
     if (command === '!attachplayer') {
       const pTarget = args[1];
       if (!pTarget || pTarget === 'stop') { 
@@ -349,12 +349,10 @@ function createBot() {
         return; 
       }
       
-      // Check if player exists
       if (!bot.players[pTarget]) {
         return bot.whisper(username, `Player ${pTarget} not found or offline.`);
       }
       
-      // Check if player entity is visible
       const targetEntity = bot.players[pTarget].entity;
       if (!targetEntity) {
         return bot.whisper(username, `Cannot see ${pTarget} (out of render distance).`);
@@ -362,7 +360,7 @@ function createBot() {
       
       attachTarget = pTarget; 
       attachType = 'player'; 
-      attackTarget = pTarget; // Set attack target to the attached player
+      attackTarget = pTarget;
       bot.pathfinder.setGoal(null); 
       bot.whisper(username, `Attached to ${pTarget} and attacking!`); 
       return;
@@ -387,7 +385,7 @@ function createBot() {
       if (!closest) return bot.whisper(username, "No mobs nearby.");
       attachTarget = closest.id; 
       attachType = 'mob';
-      attackTarget = null; // Don't auto-attack mobs when just attaching
+      attackTarget = null;
       bot.pathfinder.setGoal(null);
       bot.whisper(username, `Attached to nearest mob (${closest.name || closest.displayName || 'unknown'})`);
       return;
@@ -625,4 +623,10 @@ function createBot() {
   });
 
   bot.on('end', () => setTimeout(createBot, 15000));
-  bot.on('error',
+  bot.on('error', (err) => console.log('Error:', err));
+}
+
+createBot();
+
+app.get('/', (req, res) => res.send('Mega Sandbox Utility Bot is live!'));
+app.listen(process.env.PORT || 3000);
