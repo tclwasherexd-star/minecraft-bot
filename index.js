@@ -46,8 +46,12 @@ function createBot() {
     }, 30000);
   });
 
-  bot.on('whisper', (username, message) => {
-    console.log(`[MSG] ${username}: ${message}`);
+  // 🔍 DEBUG: log every raw message the bot receives (temporary - helps diagnose)
+  bot.on('message', (jsonMsg) => {
+    console.log('[RAW MESSAGE]', jsonMsg.toString());
+  });
+
+  function handleCommand(username, message) {
     if (username.toLowerCase() !== myUsername.toLowerCase()) {
       bot.whisper(username, "Access denied.");
       return;
@@ -122,6 +126,17 @@ function createBot() {
     if (command === '!clean') { customCommands = {}; bot.whisper(username, "Cleared sandbox memory."); return; }
 
     if (customCommands[command]) { bot.whisper(username, customCommands[command]); }
+  }
+
+  bot.on('whisper', (username, message) => {
+    console.log(`[WHISPER] ${username}: ${message}`);
+    handleCommand(username, message);
+  });
+
+  bot.on('chat', (username, message) => {
+    if (username === bot.username) return; // ignore itself
+    console.log(`[CHAT] ${username}: ${message}`);
+    if (message.startsWith('!')) handleCommand(username, message);
   });
 
   bot.on('end', () => setTimeout(createBot, 15000));
