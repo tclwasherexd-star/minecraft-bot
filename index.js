@@ -6,7 +6,7 @@ const app = express();
 const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
 // --- SECURITY ADMIN CONFIGURATION ---
-const myUsername = 'tcl'; // ✅ ADMIN SET TO TCL
+const myUsername = 'tcl'; // ✅ ADMIN SET TO tcl
 const useAuthPlugin = true, accountPassword = 'YourBotPassword123';
 let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null;
 
@@ -46,7 +46,7 @@ function createBot() {
 
     const msg = message.trim();
     const args = msg.split(' ');
-    const command = args[0].toLowerCase(); // ✅ FIXED SYSTEM EXPLICITLY HERE!
+    const command = args[0].toLowerCase(); // Fixed string parser bug
 
     if (command === '!cmds') { bot.whisper(username, "List: !help, !coords, !status, !info, !inventory, !players, !time, !weather, !jump, !stop, !come, !follow, !protect, !lookat, !talk, !shout, !click, !sneak, !activate, !sleeptest, !drop, !dropall, !hand, !equip, !attachplayer, !attachmob, !addcmd, !delcmd, !listcmds, !clean"); return; }
     if (command === '!help') { bot.whisper(username, "Modules: !help1(Info), !help2(Move), !help3(Act), !help4(Inv), !help5(Sandbox)"); return; }
@@ -64,9 +64,7 @@ function createBot() {
     if (command === '!time') { bot.whisper(username, `Time: ${bot.time.timeOfDay}`); return; }
     if (command === '!weather') { bot.whisper(username, bot.isRaining ? "Raining/Snowing" : "Clear"); return; }
     if (command === '!jump') { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 500); bot.whisper(username, "Jumped!"); return; }
-    if (command === '!stop') { bot.pathfinder.setGoal(null); bot.clearControlStates(); attachTarget = null; attachType = null; bot.whisper(username, "Cleared actions."); return; }
-    
-    if (command === '!attachplayer') {
+    if (command === '!stop') { bot.pathfinder.setGoal(null); bot.clearControlStates(); attachTarget = null; attachType = null; bot.whisper(username, "Cleared actions."); return; }    if (command === '!attachplayer') {
       const pTarget = args[1]; if (!pTarget || pTarget === 'stop') { attachTarget = null; attachType = null; bot.whisper(username, "Detached."); return; }
       if (!bot.players[pTarget]) return bot.whisper(username, "Player offline.");
       attachTarget = pTarget; attachType = 'player'; bot.pathfinder.setGoal(null); bot.whisper(username, `Attached to ${pTarget}`); return;
