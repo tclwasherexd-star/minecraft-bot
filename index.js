@@ -32,11 +32,16 @@ function createBot() {
       }, 2000);
     }
 
-    // Smooth Riding Loop
+    // Smooth Riding Loop - Fixed for attacking
     setInterval(() => {
       if (attachTarget) {
         let e = (attachType === 'player') ? bot.players[attachTarget]?.entity : bot.entities[attachTarget];
-        if (e) { bot.entity.position = e.position.offset(0, e.height, 0); } else { attachTarget = null; attachType = null; }
+        if (e) { 
+          bot.entity.position = e.position.offset(0, e.height, 0); 
+        } else { 
+          attachTarget = null; 
+          attachType = null; 
+        }
       }
     }, 50);
 
@@ -58,14 +63,34 @@ function createBot() {
       }
     }, 1000);
 
-    // Attack Mode Loop
+    // Attack Mode Loop - Now supports attacking attached players
     setInterval(() => {
-      if (!attackTarget) return;
-      const target = bot.players[attackTarget]?.entity;
-      if (!target) { bot.chat(`Lost track of ${attackTarget}, stopping attack.`); attackTarget = null; bot.pathfinder.setGoal(null); return; }
-      bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
-      if (bot.entity.position.distanceTo(target.position) < 3) bot.attack(target);
-    }, 1000);
+      // Check for attack target (including attached players)
+      const targetName = attackTarget || (attachType === 'player' ? attachTarget : null);
+      if (!targetName) return;
+      
+      const target = bot.players[targetName]?.entity;
+      if (!target) { 
+        bot.chat(`Lost track of ${targetName}, stopping attack.`); 
+        attackTarget = null; 
+        if (attachType === 'player' && attachTarget === targetName) {
+          attachTarget = null;
+          attachType = null;
+        }
+        bot.pathfinder.setGoal(null); 
+        return; 
+      }
+      
+      // Attack the target if close enough
+      if (bot.entity.position.distanceTo(target.position) < 3) {
+        bot.attack(target);
+        // Look at the target while attacking
+        bot.lookAt(target.position.offset(0, target.height, 0));
+      } else if (!(attachType === 'player' && attachTarget === targetName)) {
+        // Only pathfind if not attached (attached players are already on top)
+        bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+      }
+    }, 500); // Faster attack check
 
     // Wander Loop
     setInterval(() => {
@@ -134,7 +159,7 @@ function createBot() {
         "§6§l✦ ═══ CLOUDAFK BOT COMMANDS ═══ ✦",
         "§b▶ Info: §f!coords (location) !status (hp/food) !info (biome/ping) !inventory !players !time !weather !nearbyplayers [r] !nearbymobs [r] !health [p] !whereis [p] !exp !gamemode !uptime !tps",
         "§a▶ Movement: §f!come (to you) !follow [p] !goto x y z !wander [r] !flee !attachplayer [p] !attachmob !jump !stop",
-        "§c▶ Combat: §f!attack [p] (hunt+fight) !protect [stop] (guard mode)",
+        "§c▶ Combat: §f!attack [p] (hunt+fight) !protect [stop] (guard mode) !attachplayer [p] (attach+attack)",
         "§d▶ Actions: §f!talk [msg] !shout [msg] !click !sneak [stop] !activate !lookat [p] !sleeptest",
         "§e▶ Building: §f!place [item] !placeat x y z item !fill item w h d !dig !collect block amt !blockinfo",
         "§9▶ Inventory: §f!drop !dropall !hand !equip [item]",
@@ -156,7 +181,7 @@ function createBot() {
     if (command === '!help5') { bot.whisper(username, "Sandbox: !addcmd !delcmd !listcmds !clean"); return; }
     if (command === '!help6') { bot.whisper(username, "Build: !place !placeat !fill !dig !collect !blockinfo"); return; }
     if (command === '!help7') { bot.whisper(username, "Fun: !echo !ping !spin !emote !8ball !coinflip !roll"); return; }
-    if (command === '!help8') { bot.whisper(username, "Combat: !attack !protect !flee"); return; }
+    if (command === '!help8') { bot.whisper(username, "Combat: !attack !attachplayer !protect !flee"); return; }
 
     if (command === '!coords') { const p = bot.entity.position; bot.whisper(username, `X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
     if (command === '!status') { bot.whisper(username, `HP:${bot.health}/20 | Food:${bot.food}/20`); return; }
@@ -178,6 +203,7 @@ function createBot() {
 
     if (command === '!come') {
       attachTarget = null; attachType = null;
+      attackTarget = null;
       const target = bot.players[username]?.entity;
       if (!target) return bot.whisper(username, "Can't see you.");
       const p = target.position;
@@ -186,12 +212,27 @@ function createBot() {
       return;
     }
 
+    // FIXED: !follow command - properly handles both with and without player argument
     if (command === '!follow') {
-      attachTarget = null; attachType = null;
-      const target = findPlayerOrArg(username, args);
-      if (!target) return bot.whisper(username, "Player not found/offline.");
+      attachTarget = null; 
+      attachType = null;
+      attackTarget = null;
+      
+      // Check if a player name was provided as argument
+      const targetName = args[1] || username;
+      
+      // Verify the target player exists
+      if (!bot.players[targetName]) {
+        return bot.whisper(username, `Player ${targetName} not found or offline.`);
+      }
+      
+      const target = bot.players[targetName].entity;
+      if (!target) {
+        return bot.whisper(username, `Cannot see ${targetName} (out of render distance).`);
+      }
+      
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
-      bot.whisper(username, `Following ${args[1] || username}`);
+      bot.whisper(username, `Following ${targetName}`);
       return;
     }
 
@@ -199,6 +240,7 @@ function createBot() {
       const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
       if ([x, y, z].some(isNaN)) return bot.whisper(username, "Use: !goto [x] [y] [z]");
       attachTarget = null; attachType = null;
+      attackTarget = null;
       bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1));
       bot.whisper(username, `Heading to ${x}, ${y}, ${z}`);
       return;
@@ -223,7 +265,12 @@ function createBot() {
 
     if (command === '!attack') {
       const pTarget = args[1];
-      if (!pTarget || pTarget === 'stop') { attackTarget = null; bot.pathfinder.setGoal(null); bot.whisper(username, "Attack stopped."); return; }
+      if (!pTarget || pTarget === 'stop') { 
+        attackTarget = null; 
+        bot.pathfinder.setGoal(null); 
+        bot.whisper(username, "Attack stopped."); 
+        return; 
+      }
       if (!bot.players[pTarget]) return bot.whisper(username, "Player offline.");
       attackTarget = pTarget;
       bot.whisper(username, `Attacking ${pTarget}!`);
@@ -290,14 +337,45 @@ function createBot() {
       return;
     }
 
+    // FIXED: !attachplayer command - properly attaches AND attacks the player
     if (command === '!attachplayer') {
       const pTarget = args[1];
-      if (!pTarget || pTarget === 'stop') { attachTarget = null; attachType = null; bot.whisper(username, "Detached."); return; }
-      if (!bot.players[pTarget]) return bot.whisper(username, "Player offline.");
-      attachTarget = pTarget; attachType = 'player'; bot.pathfinder.setGoal(null); bot.whisper(username, `Attached to ${pTarget}`); return;
+      if (!pTarget || pTarget === 'stop') { 
+        attachTarget = null; 
+        attachType = null; 
+        attackTarget = null;
+        bot.pathfinder.setGoal(null);
+        bot.whisper(username, "Detached and stopped attacking."); 
+        return; 
+      }
+      
+      // Check if player exists
+      if (!bot.players[pTarget]) {
+        return bot.whisper(username, `Player ${pTarget} not found or offline.`);
+      }
+      
+      // Check if player entity is visible
+      const targetEntity = bot.players[pTarget].entity;
+      if (!targetEntity) {
+        return bot.whisper(username, `Cannot see ${pTarget} (out of render distance).`);
+      }
+      
+      attachTarget = pTarget; 
+      attachType = 'player'; 
+      attackTarget = pTarget; // Set attack target to the attached player
+      bot.pathfinder.setGoal(null); 
+      bot.whisper(username, `Attached to ${pTarget} and attacking!`); 
+      return;
     }
+
     if (command === '!attachmob') {
-      if (args[1] === 'stop') { attachTarget = null; attachType = null; bot.whisper(username, "Detached."); return; }
+      if (args[1] === 'stop') { 
+        attachTarget = null; 
+        attachType = null; 
+        attackTarget = null;
+        bot.whisper(username, "Detached."); 
+        return; 
+      }
       let closest = null, min = 999;
       for (const id in bot.entities) {
         const e = bot.entities[id];
@@ -307,7 +385,9 @@ function createBot() {
         }
       }
       if (!closest) return bot.whisper(username, "No mobs nearby.");
-      attachTarget = closest.id; attachType = 'mob';
+      attachTarget = closest.id; 
+      attachType = 'mob';
+      attackTarget = null; // Don't auto-attack mobs when just attaching
       bot.pathfinder.setGoal(null);
       bot.whisper(username, `Attached to nearest mob (${closest.name || closest.displayName || 'unknown'})`);
       return;
@@ -545,10 +625,4 @@ function createBot() {
   });
 
   bot.on('end', () => setTimeout(createBot, 15000));
-  bot.on('error', (err) => console.log('Error:', err));
-}
-
-createBot();
-
-app.get('/', (req, res) => res.send('Mega Sandbox Utility Bot is live!'));
-app.listen(process.env.PORT || 3000);
+  bot.on('error',
