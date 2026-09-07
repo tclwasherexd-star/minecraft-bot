@@ -4,7 +4,7 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const net = require('net');
 const app = express();
 
-const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
+const config = { host: 'play.concordmc.net', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
