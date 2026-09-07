@@ -114,7 +114,5 @@ function createBot() {
 createBot();
 
 // Keep-alive Express layer for cloud hosting platforms
-const express = require('express');
-const app = express();
 app.get('/', (req, res) => res.send('AFK Bot is running 24/7'));
 app.listen(process.env.PORT || 3000);
