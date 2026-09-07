@@ -7,8 +7,9 @@ const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK
 
 // --- SECURITY ADMIN CONFIGURATION ---
 const myUsername = 'tcl'; // ✅ Admin is set to you!
-const useAuthPlugin = true, accountPassword = 'YourBotPassword123';
-let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null;
+const useAuthPlugin = false; // server has no register/login plugin - turned off
+const accountPassword = 'YourBotPassword123';
+let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null, protectMode = false;
 
 function createBot() {
   bot = mineflayer.createBot(config);
@@ -44,12 +45,31 @@ function createBot() {
         setTimeout(() => bot.setControlState('jump', false), 500);
       }
     }, 30000);
+
+    // Protect Mode Loop - attacks nearest hostile mob near the bot
+    setInterval(() => {
+      if (!protectMode) return;
+      const hostile = bot.nearestEntity(e => e.type === 'hostile' || e.type === 'monster');
+      if (hostile && bot.entity.position.distanceTo(hostile.position) < 16) {
+        bot.pathfinder.setGoal(new goals.GoalFollow(hostile, 2), true);
+        if (bot.entity.position.distanceTo(hostile.position) < 3) {
+          bot.attack(hostile);
+        }
+      }
+    }, 1000);
   });
 
   // 🔍 DEBUG: log every raw message the bot receives (temporary - helps diagnose)
   bot.on('message', (jsonMsg) => {
     console.log('[RAW MESSAGE]', jsonMsg.toString());
   });
+
+  function findPlayerOrArg(username, args) {
+    // if an arg name is given and online, use them - else use the sender
+    const target = args[1];
+    if (target && bot.players[target]) return bot.players[target].entity;
+    return bot.players[username]?.entity || null;
+  }
 
   function handleCommand(username, message) {
     if (username.toLowerCase() !== myUsername.toLowerCase()) {
@@ -84,7 +104,98 @@ function createBot() {
       bot.clearControlStates();
       attachTarget = null;
       attachType = null;
+      protectMode = false;
       bot.whisper(username, "Cleared actions.");
+      return;
+    }
+
+    if (command === '!come') {
+      const target = bot.players[username]?.entity;
+      if (!target) return bot.whisper(username, "Can't see you.");
+      const p = target.position;
+      bot.pathfinder.setGoal(new goals.GoalNear(p.x, p.y, p.z, 1));
+      bot.whisper(username, "Coming!");
+      return;
+    }
+
+    if (command === '!follow') {
+      const target = findPlayerOrArg(username, args);
+      if (!target) return bot.whisper(username, "Player not found/offline.");
+      bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+      bot.whisper(username, `Following ${args[1] || username}`);
+      return;
+    }
+
+    if (command === '!protect') {
+      if (args[1] === 'stop') { protectMode = false; bot.pathfinder.setGoal(null); bot.whisper(username, "Protect mode off."); return; }
+      protectMode = true;
+      bot.whisper(username, "Protect mode on - attacking nearby hostiles.");
+      return;
+    }
+
+    if (command === '!lookat') {
+      const target = findPlayerOrArg(username, args);
+      if (!target) return bot.whisper(username, "Player not found/offline.");
+      bot.lookAt(target.position.offset(0, target.height, 0));
+      bot.whisper(username, `Looking at ${args[1] || username}`);
+      return;
+    }
+
+    if (command === '!talk') {
+      const text = args.slice(1).join(' ');
+      if (!text) return bot.whisper(username, "Use: !talk [message]");
+      bot.chat(text);
+      return;
+    }
+
+    if (command === '!shout') {
+      const text = args.slice(1).join(' ');
+      if (!text) return bot.whisper(username, "Use: !shout [message]");
+      bot.chat(`${text.toUpperCase()}!!!`);
+      return;
+    }
+
+    if (command === '!click') {
+      const target = bot.nearestEntity(e => e !== bot.entity && bot.entity.position.distanceTo(e.position) < 4);
+      if (!target) return bot.whisper(username, "Nothing in range.");
+      bot.attack(target);
+      bot.whisper(username, `Clicked ${target.name || target.username || target.displayName || 'entity'}`);
+      return;
+    }
+
+    if (command === '!sneak') {
+      const state = args[1] !== 'stop';
+      bot.setControlState('sneak', state);
+      bot.whisper(username, state ? "Sneaking." : "Standing.");
+      return;
+    }
+
+    if (command === '!activate') {
+      const block = bot.blockAtCursor(5);
+      if (block) {
+        bot.activateBlock(block);
+        bot.whisper(username, `Activated block: ${block.name}`);
+        return;
+      }
+      const entity = bot.nearestEntity(e => e !== bot.entity && bot.entity.position.distanceTo(e.position) < 4);
+      if (entity) {
+        bot.activateEntity(entity);
+        bot.whisper(username, `Activated entity: ${entity.name || entity.displayName || 'entity'}`);
+        return;
+      }
+      bot.whisper(username, "Nothing to activate.");
+      return;
+    }
+
+    if (command === '!sleeptest') {
+      const bedBlock = bot.findBlock({
+        matching: (block) => block.name.includes('bed'),
+        maxDistance: 16
+      });
+      if (!bedBlock) return bot.whisper(username, "No bed nearby.");
+      bot.sleep(bedBlock)
+        .then(() => bot.whisper(username, "Sleeping."))
+        .catch(e => bot.whisper(username, `Can't sleep: ${e.message}`));
       return;
     }
 
