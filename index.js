@@ -28,7 +28,7 @@ function createBot() {
         bot.chat(`/login ${accountPassword}`);
       }, 2000);
     }
-    
+
     // Smooth Riding Loop (20 ticks per second)
     setInterval(() => {
       if (attachTarget) {
@@ -56,7 +56,7 @@ function createBot() {
     const msg = message.trim();
     const args = msg.split(' ');
     if (!args || args.length === 0) return;
-    const command = args[0].toLowerCase(); // ✅ FIXED: Reads the first word safely!
+    const command = args[0].toLowerCase();
 
     if (command === '!cmds') { bot.whisper(username, "List: !help, !coords, !status, !info, !inventory, !players, !time, !weather, !jump, !stop, !come, !follow, !protect, !lookat, !talk, !shout, !click, !sneak, !activate, !sleeptest, !drop, !dropall, !hand, !equip, !attachplayer, !attachmob, !addcmd, !delcmd, !listcmds, !clean"); return; }
     if (command === '!help') { bot.whisper(username, "Modules: !help1(Info), !help2(Move), !help3(Act), !help4(Inv), !help5(Sandbox)"); return; }
@@ -65,7 +65,7 @@ function createBot() {
     if (command === '!help3') { bot.whisper(username, "Act: !talk, !shout, !click, !sneak, !activate, !sleeptest"); return; }
     if (command === '!help4') { bot.whisper(username, "Inv: !drop, !dropall, !hand, !equip"); return; }
     if (command === '!help5') { bot.whisper(username, "Sandbox: !addcmd, !delcmd, !listcmds, !clean"); return; }
-    
+
     if (command === '!coords') { const p = bot.entity.position; bot.whisper(username, `X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
     if (command === '!status') { bot.whisper(username, `HP:${bot.health}/20 | Food:${bot.food}/20`); return; }
     if (command === '!info') { bot.whisper(username, `Biome:${bot.blockAt(bot.entity.position)?.biome.name} | Ping:${bot.player.ping}ms`); return; }
@@ -74,18 +74,18 @@ function createBot() {
     if (command === '!time') { bot.whisper(username, `Time: ${bot.time.timeOfDay}`); return; }
     if (command === '!weather') { bot.whisper(username, bot.isRaining ? "Raining/Snowing" : "Clear"); return; }
     if (command === '!jump') { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 500); bot.whisper(username, "Jumped!"); return; }
-    
-    if (command === '!stop') { 
-      bot.pathfinder.setGoal(null); 
-      bot.clearControlStates(); 
-      attachTarget = null; 
-      attachType = null; 
-      bot.whisper(username, "Cleared actions."); 
-      return; 
+
+    if (command === '!stop') {
+      bot.pathfinder.setGoal(null);
+      bot.clearControlStates();
+      attachTarget = null;
+      attachType = null;
+      bot.whisper(username, "Cleared actions.");
+      return;
     }
-    
+
     if (command === '!attachplayer') {
-      const pTarget = args[1]; 
+      const pTarget = args[1];
       if (!pTarget || pTarget === 'stop') { attachTarget = null; attachType = null; bot.whisper(username, "Detached."); return; }
       if (!bot.players[pTarget]) return bot.whisper(username, "Player offline.");
       attachTarget = pTarget; attachType = 'player'; bot.pathfinder.setGoal(null); bot.whisper(username, `Attached to ${pTarget}`); return;
@@ -96,8 +96,18 @@ function createBot() {
       for (const id in bot.entities) {
         const e = bot.entities[id];
         if (e.type === 'mob' || e.type === 'animal' || e.type === 'monster') {
-          const d = bot.entity.position.distanceTo(e.position); 
-          if (d  bot.whisper(username, e.message)); return; }
+          const d = bot.entity.position.distanceTo(e.position);
+          if (d < min) { min = d; closest = e; }
+        }
+      }
+      if (!closest) return bot.whisper(username, "No mobs nearby.");
+      attachTarget = closest.id;
+      attachType = 'mob';
+      bot.pathfinder.setGoal(null);
+      bot.whisper(username, `Attached to nearest mob (${closest.name || closest.displayName || 'unknown'})`);
+      return;
+    }
+
     if (command === '!drop') { const h = bot.inventory.slots[bot.getEquipmentDestSlot('hand')]; if (!h) return bot.whisper(username, "Hand empty."); bot.tossStack(h); bot.whisper(username, "Dropped."); return; }
     if (command === '!dropall') { const items = bot.inventory.items(); if (items.length === 0) return bot.whisper(username, "Empty."); async function tossAll() { for (const i of items) { try { await bot.tossStack(i); } catch (e) {} } } tossAll(); bot.whisper(username, "Dropped all."); return; }
     if (command === '!hand') { const i = bot.heldItem; bot.whisper(username, i ? `Holding: ${i.name} x${i.count}` : "Empty."); return; }
@@ -110,7 +120,7 @@ function createBot() {
     if (command === '!delcmd') { const cmdName = args[1]?.toLowerCase(); if (customCommands[cmdName]) { delete customCommands[cmdName]; bot.whisper(username, `Deleted ${cmdName}`); } else { bot.whisper(username, 'Not found.'); } return; }
     if (command === '!listcmds') { const keys = Object.keys(customCommands); bot.whisper(username, keys.length ? `Custom: ${keys.join(', ')}` : "No custom commands."); return; }
     if (command === '!clean') { customCommands = {}; bot.whisper(username, "Cleared sandbox memory."); return; }
-    
+
     if (customCommands[command]) { bot.whisper(username, customCommands[command]); }
   });
 
@@ -120,3 +130,5 @@ function createBot() {
 
 createBot();
 
+app.get('/', (req, res) => res.send('Mega Sandbox Utility Bot is live!'));
+app.listen(process.env.PORT || 3000);
