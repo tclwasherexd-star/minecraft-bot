@@ -16,7 +16,6 @@ let mcConsoleLogs = [];
 let botStatus = 'offline';
 
 app.use(express.json());
-app.use(express.static('public'));
 
 function createBot() {
   bot = mineflayer.createBot(config);
@@ -32,26 +31,15 @@ function createBot() {
     
     const mcData = require('minecraft-data')(bot.version);
     defaultMove = new Movements(bot, mcData);
-    
-    // IMPROVED MOVEMENT SETTINGS
     defaultMove.canDig = true;
     defaultMove.allow1by1towers = false;
     defaultMove.allowParkour = true;
     defaultMove.allowSprinting = true;
     defaultMove.maxDropDown = 4;
-    defaultMove.scafoldingBlocks = [];
-    defaultMove.placeCost = 100;
-    defaultMove.breakCost = 100;
-    defaultMove.entityCost = 100;
-    defaultMove.blocksCantBreak = new Set();
-    defaultMove.blocksToAvoid = new Set();
     defaultMove.liquidCost = 10;
     defaultMove.avoidDamage = true;
     defaultMove.allowFreeMotion = true;
-    defaultMove.allowSprinting = true;
     defaultMove.allowEntityDetection = true;
-    defaultMove.maxPortalAttempts = 10;
-    
     bot.pathfinder.setMovements(defaultMove);
     bot.pathfinder.enablePathShortcuts = true;
     bot.pathfinder.thinkTimeout = 100;
@@ -97,7 +85,7 @@ function createBot() {
 
     // Anti-AFK Jump Loop
     setInterval(() => {
-      if (!freezeMode && !bot.pathfinder.isMoving() && !attachTarget && !wanderMode && !autoBreakBlock && !huntTarget) {
+      if (!freezeMode && !bot.pathfinder.isMoving() && !attachTarget && !wanderMode && !autoBreakBlock && !huntTarget && !attackMobs) {
         bot.setControlState('jump', true);
         setTimeout(() => bot.setControlState('jump', false), 500);
       }
@@ -160,6 +148,7 @@ function createBot() {
           bot.pathfinder.setGoal(new goals.GoalFollow(mob, 2), true);
           if (bot.entity.position.distanceTo(mob.position) < 3) {
             bot.attack(mob);
+            bot.lookAt(mob.position.offset(0, mob.height, 0));
           }
         }
       }
@@ -256,8 +245,13 @@ function createBot() {
 
   function findPlayerOrArg(username, args) {
     const target = args[1];
-    if (target && bot.players[target]) return bot.players[target].entity;
-    return bot.players[username]?.entity || null;
+    if (target && bot.players[target] && bot.players[target].entity) {
+      return bot.players[target].entity;
+    }
+    if (bot.players[username] && bot.players[username].entity) {
+      return bot.players[username].entity;
+    }
+    return null;
   }
 
   function fmtTime(ms) {
@@ -697,10 +691,10 @@ function createBot() {
       (async () => {
         for (const item of armorItems) {
           try {
-            await bot.equip(item, 'torso');
-            await bot.equip(item, 'legs');
-            await bot.equip(item, 'feet');
-            await bot.equip(item, 'head');
+            if (item.name.includes('helmet')) await bot.equip(item, 'head');
+            if (item.name.includes('chestplate')) await bot.equip(item, 'torso');
+            if (item.name.includes('leggings')) await bot.equip(item, 'legs');
+            if (item.name.includes('boots')) await bot.equip(item, 'feet');
           } catch (e) {}
         }
         bot.whisper(username, "✅ Armor equipped!");
@@ -716,10 +710,24 @@ function createBot() {
     }
 
     if (command === '!lookat') {
-      const target = findPlayerOrArg(username, args);
-      if (!target) return bot.whisper(username, "❌ Player not found/offline.");
-      bot.lookAt(target.position.offset(0, target.height, 0));
-      bot.whisper(username, `👀 Looking at ${args[1] || username}`);
+      const targetName = args[1] || username;
+      const player = bot.players[targetName];
+      
+      if (!player) {
+        return bot.whisper(username, `❌ Player ${targetName} not found or offline.`);
+      }
+      
+      const target = player.entity;
+      if (!target) {
+        return bot.whisper(username, `❌ Cannot see ${targetName} (out of render distance).`);
+      }
+      
+      try {
+        bot.lookAt(target.position.offset(0, target.height, 0), true);
+        bot.whisper(username, `👀 Looking at ${targetName}`);
+      } catch (e) {
+        bot.whisper(username, `❌ Failed to look at ${targetName}: ${e.message}`);
+      }
       return;
     }
 
@@ -892,7 +900,9 @@ function createBot() {
 
     if (command === '!dig') {
       const block = bot.blockAtCursor(10);
-      if (!block || block.name === 'air') return bot.whisper(username, "❌ No block in view.");
+      if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') {
+        return bot.whisper(username, "❌ No block in view. Look at a block and try again.");
+      }
       
       bot.whisper(username, `✅ Digging ${block.name}...`);
       
@@ -1065,204 +1075,61 @@ app.get('/', (req, res) => {
       <title>CloudAFK Bot Dashboard</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          min-height: 100vh;
-          color: white;
-        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; color: white; }
         .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
         h1 { text-align: center; margin-bottom: 30px; font-size: 2.5em; }
-        .status-bar {
-          display: flex;
-          justify-content: space-around;
-          margin-bottom: 30px;
-          flex-wrap: wrap;
-          gap: 10px;
-        }
-        .status-card {
-          background: rgba(255,255,255,0.1);
-          backdrop-filter: blur(10px);
-          border-radius: 15px;
-          padding: 20px;
-          text-align: center;
-          min-width: 150px;
-          flex: 1;
-        }
+        .status-bar { display: flex; justify-content: space-around; margin-bottom: 30px; flex-wrap: wrap; gap: 10px; }
+        .status-card { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); border-radius: 15px; padding: 20px; text-align: center; min-width: 150px; flex: 1; }
         .status-card h3 { margin-bottom: 10px; font-size: 0.9em; opacity: 0.8; }
         .status-card .value { font-size: 1.5em; font-weight: bold; }
-        .console-container {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 20px;
-          margin-top: 20px;
-        }
-        .console-box {
-          background: rgba(0,0,0,0.8);
-          border-radius: 10px;
-          padding: 15px;
-          height: 400px;
-          overflow-y: auto;
-        }
-        .console-box h2 {
-          margin-bottom: 10px;
-          color: #4CAF50;
-          font-size: 1.2em;
-        }
-        .console-log {
-          font-family: 'Courier New', monospace;
-          font-size: 12px;
-          padding: 3px 0;
-          border-bottom: 1px solid rgba(255,255,255,0.1);
-        }
-        .console-input {
-          margin-top: 10px;
-          display: flex;
-          gap: 10px;
-        }
-        .console-input input {
-          flex: 1;
-          padding: 10px;
-          border: none;
-          border-radius: 5px;
-          background: rgba(255,255,255,0.1);
-          color: white;
-        }
-        .console-input button {
-          padding: 10px 20px;
-          background: #4CAF50;
-          border: none;
-          border-radius: 5px;
-          color: white;
-          cursor: pointer;
-        }
-        .players-list {
-          background: rgba(255,255,255,0.1);
-          border-radius: 10px;
-          padding: 15px;
-          margin-top: 20px;
-        }
+        .console-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+        .console-box { background: rgba(0,0,0,0.8); border-radius: 10px; padding: 15px; height: 400px; overflow-y: auto; }
+        .console-box h2 { margin-bottom: 10px; color: #4CAF50; font-size: 1.2em; }
+        .console-log { font-family: 'Courier New', monospace; font-size: 12px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .console-input { margin-top: 10px; display: flex; gap: 10px; }
+        .console-input input { flex: 1; padding: 10px; border: none; border-radius: 5px; background: rgba(255,255,255,0.1); color: white; }
+        .console-input button { padding: 10px 20px; background: #4CAF50; border: none; border-radius: 5px; color: white; cursor: pointer; }
+        .players-list { background: rgba(255,255,255,0.1); border-radius: 10px; padding: 15px; margin-top: 20px; }
         .players-list h2 { margin-bottom: 10px; }
-        .player-item {
-          display: inline-block;
-          background: rgba(255,255,255,0.1);
-          padding: 5px 15px;
-          border-radius: 20px;
-          margin: 5px;
-        }
-        @media (max-width: 768px) {
-          .console-container { grid-template-columns: 1fr; }
-        }
+        .player-item { display: inline-block; background: rgba(255,255,255,0.1); padding: 5px 15px; border-radius: 20px; margin: 5px; }
+        @media (max-width: 768px) { .console-container { grid-template-columns: 1fr; } }
       </style>
     </head>
     <body>
       <div class="container">
         <h1>⚡ CloudAFK Bot Dashboard ⚡</h1>
-        
         <div class="status-bar">
-          <div class="status-card">
-            <h3>Bot Status</h3>
-            <div class="value" id="botStatus">Offline</div>
-          </div>
-          <div class="status-card">
-            <h3>Players Online</h3>
-            <div class="value" id="playerCount">0</div>
-          </div>
-          <div class="status-card">
-            <h3>Bot Health</h3>
-            <div class="value" id="botHealth">-</div>
-          </div>
-          <div class="status-card">
-            <h3>Bot Food</h3>
-            <div class="value" id="botFood">-</div>
-          </div>
-          <div class="status-card">
-            <h3>Ping</h3>
-            <div class="value" id="botPing">-</div>
-          </div>
-          <div class="status-card">
-            <h3>Uptime</h3>
-            <div class="value" id="botUptime">-</div>
-          </div>
+          <div class="status-card"><h3>Bot Status</h3><div class="value" id="botStatus">Offline</div></div>
+          <div class="status-card"><h3>Players Online</h3><div class="value" id="playerCount">0</div></div>
+          <div class="status-card"><h3>Bot Health</h3><div class="value" id="botHealth">-</div></div>
+          <div class="status-card"><h3>Bot Food</h3><div class="value" id="botFood">-</div></div>
+          <div class="status-card"><h3>Ping</h3><div class="value" id="botPing">-</div></div>
+          <div class="status-card"><h3>Uptime</h3><div class="value" id="botUptime">-</div></div>
         </div>
-
         <div class="console-container">
           <div>
-            <div class="console-box" id="botConsole">
-              <h2>Bot Console</h2>
-            </div>
-            <div class="console-input">
-              <input type="text" id="consoleCommand" placeholder="Enter command...">
-              <button onclick="sendCommand()">Send</button>
-            </div>
+            <div class="console-box" id="botConsole"><h2>Bot Console</h2></div>
+            <div class="console-input"><input type="text" id="consoleCommand" placeholder="Enter command..."><button onclick="sendCommand()">Send</button></div>
           </div>
           <div>
-            <div class="console-box" id="mcConsole">
-              <h2>Minecraft Console</h2>
-            </div>
+            <div class="console-box" id="mcConsole"><h2>Minecraft Console</h2></div>
           </div>
         </div>
-
-        <div class="players-list">
-          <h2>Online Players</h2>
-          <div id="playersList">Loading...</div>
-        </div>
+        <div class="players-list"><h2>Online Players</h2><div id="playersList">Loading...</div></div>
       </div>
-
       <script src="/socket.io/socket.io.js"></script>
       <script>
         const socket = io();
-        
-        socket.on('consoleLog', (log) => {
-          const consoleBox = document.getElementById('botConsole');
-          const logDiv = document.createElement('div');
-          logDiv.className = 'console-log';
-          logDiv.textContent = log;
-          consoleBox.appendChild(logDiv);
-          consoleBox.scrollTop = consoleBox.scrollHeight;
-        });
-        
-        socket.on('mcConsoleLog', (log) => {
-          const consoleBox = document.getElementById('mcConsole');
-          const logDiv = document.createElement('div');
-          logDiv.className = 'console-log';
-          logDiv.textContent = log;
-          consoleBox.appendChild(logDiv);
-          consoleBox.scrollTop = consoleBox.scrollHeight;
-        });
-        
-        function sendCommand() {
-          const input = document.getElementById('consoleCommand');
-          const cmd = input.value;
-          if (cmd) {
-            socket.emit('consoleCommand', cmd);
-            input.value = '';
-          }
-        }
-        
-        // Update status every 5 seconds
-        setInterval(() => {
-          fetch('/api/status')
-            .then(res => res.json())
-            .then(data => {
-              document.getElementById('botStatus').textContent = data.status;
-              document.getElementById('playerCount').textContent = data.playerCount;
-              document.getElementById('botHealth').textContent = data.health;
-              document.getElementById('botFood').textContent = data.food;
-              document.getElementById('botPing').textContent = data.ping + 'ms';
-              document.getElementById('botUptime').textContent = data.uptime;
-              document.getElementById('playersList').innerHTML = data.players.map(p => 
-                '<span class="player-item">' + p + '</span>'
-              ).join('');
-            });
-        }, 5000);
+        socket.on('consoleLog', (log) => { const consoleBox = document.getElementById('botConsole'); const logDiv = document.createElement('div'); logDiv.className = 'console-log'; logDiv.textContent = log; consoleBox.appendChild(logDiv); consoleBox.scrollTop = consoleBox.scrollHeight; });
+        socket.on('mcConsoleLog', (log) => { const consoleBox = document.getElementById('mcConsole'); const logDiv = document.createElement('div'); logDiv.className = 'console-log'; logDiv.textContent = log; consoleBox.appendChild(logDiv); consoleBox.scrollTop = consoleBox.scrollHeight; });
+        function sendCommand() { const input = document.getElementById('consoleCommand'); const cmd = input.value; if (cmd) { socket.emit('consoleCommand', cmd); input.value = ''; } }
+        setInterval(() => { fetch('/api/status').then(res => res.json()).then(data => { document.getElementById('botStatus').textContent = data.status; document.getElementById('playerCount').textContent = data.playerCount; document.getElementById('botHealth').textContent = data.health; document.getElementById('botFood').textContent = data.food; document.getElementById('botPing').textContent = data.ping + 'ms'; document.getElementById('botUptime').textContent = data.uptime; document.getElementById('playersList').innerHTML = data.players.map(p => '<span class="player-item">' + p + '</span>').join(''); }); }, 5000);
       </script>
     </body>
     </html>
   `);
 });
 
-// API endpoints
 app.get('/api/status', (req, res) => {
   const data = {
     status: botStatus,
@@ -1276,21 +1143,10 @@ app.get('/api/status', (req, res) => {
   res.json(data);
 });
 
-app.post('/api/command', (req, res) => {
-  const cmd = req.body.command;
-  if (cmd && bot) {
-    bot.chat(cmd);
-    res.json({ success: true });
-  } else {
-    res.json({ success: false });
-  }
-});
-
 io.on('connection', (socket) => {
   socket.on('consoleCommand', (cmd) => {
     if (bot) {
       bot.chat(cmd);
-      addConsoleLog('Command sent: ' + cmd);
     }
   });
 });
