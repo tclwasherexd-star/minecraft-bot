@@ -15,7 +15,7 @@ const config = {
 const useAuthPlugin = true;       // Set to false if your server doesn't use /register or /login
 const accountPassword = 'YourBotPassword123'; // Change this to a secure password for the bot
 
-let bot; // Declare bot globally so it can be read everywhere in the script
+let bot;
 
 function createBot() {
     bot = mineflayer.createBot(config);
@@ -40,43 +40,47 @@ function createBot() {
     });
 
     // ========================================================
-    // CUSTOM IN-GAME COMMAND SYSTEM
+    // CUSTOM IN-GAME COMMAND SYSTEM WITH LOGGING
     // ========================================================
     bot.on('chat', (username, message) => {
-        // Ignore messages sent by the bot itself to prevent infinite loops
+        // Log chat to Render console so we can see why it might fail
+        console.log(`[CHAT LOG] ${username}: ${message}`);
+
         if (username === bot.username) return;
 
+        const msg = message.trim();
+
         // Command: !help
-        if (message === '!help') {
+        if (msg === '!help') {
             bot.chat(`Hello ${username}! Available commands: !coords, !jump, !status, !drop, !talk [msg]`);
         }
 
-        // Command: !coords (Tells everyone the bot's position)
-        if (message === '!coords') {
+        // Command: !coords
+        if (msg === '!coords') {
             const p = bot.entity.position;
             bot.chat(`I am at X: ${Math.round(p.x)}, Y: ${Math.round(p.y)}, Z: ${Math.round(p.z)}`);
         }
 
-        // Command: !jump (Makes the bot jump on demand)
-        if (message === '!jump') {
+        // Command: !jump
+        if (msg === '!jump') {
             bot.chat('Jumping!');
             bot.setControlState('jump', true);
             setTimeout(() => bot.setControlState('jump', false), 500);
         }
 
-        // Command: !status (Checks bot health and food stats)
-        if (message === '!status') {
+        // Command: !status
+        if (msg === '!status') {
             bot.chat(`Health: ${bot.health}/20 | Food: ${bot.food}/20`);
         }
 
-        // Command: !talk [message] (Makes the bot repeat what you say)
-        if (message.startsWith('!talk ')) {
-            const textToSay = message.replace('!talk ', '');
+        // Command: !talk [message]
+        if (msg.startsWith('!talk ')) {
+            const textToSay = msg.replace('!talk ', '');
             bot.chat(textToSay);
         }
 
-        // Command: !drop (Makes the bot drop its inventory items)
-        if (message === '!drop') {
+        // Command: !drop
+        if (msg === '!drop') {
             const items = bot.inventory.items();
             if (items.length === 0) {
                 bot.chat("My inventory is empty!");
