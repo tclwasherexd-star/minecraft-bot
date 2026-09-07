@@ -46,7 +46,7 @@ function createBot() {
 
     const msg = message.trim();
     const args = msg.split(' ');
-    const command = args[0].toLowerCase(); // ✅ FIXED: Only targets the single word command!
+    const command = args[0].toLowerCase(); // ✅ FIXED SYSTEM EXPLICITLY HERE!
 
     if (command === '!cmds') { bot.whisper(username, "List: !help, !coords, !status, !info, !inventory, !players, !time, !weather, !jump, !stop, !come, !follow, !protect, !lookat, !talk, !shout, !click, !sneak, !activate, !sleeptest, !drop, !dropall, !hand, !equip, !attachplayer, !attachmob, !addcmd, !delcmd, !listcmds, !clean"); return; }
     if (command === '!help') { bot.whisper(username, "Modules: !help1(Info), !help2(Move), !help3(Act), !help4(Inv), !help5(Sandbox)"); return; }
