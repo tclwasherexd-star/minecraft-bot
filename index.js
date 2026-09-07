@@ -4,13 +4,22 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const net = require('net');
 const app = express();
 
-const config = { host: 'play.concordmc.net', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
+const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null, protectMode = false, attackTarget = null, wanderMode = false, spawnTime = null, collectItemsMode = false, followTarget = null, spinAttackMode = false, patrolMode = false, guardTarget = null, autoEatMode = false, autoFishMode = false, spinMode = false;
 
-// Statistics and logs tracking
+// Rate limiting and anti-crash protection
+let messageQueue = [];
+let isProcessingQueue = false;
+let lastMessageTime = 0;
+let messageCount = 0;
+const MAX_MESSAGES_PER_SECOND = 2;
+const MESSAGE_INTERVAL = 500; // 500ms between messages
+const MAX_QUEUE_SIZE = 10;
+
+// Enhanced Statistics
 let botStats = {
   totalJoins: 0,
   totalDisconnects: 0,
@@ -33,44 +42,124 @@ let botStats = {
   realPlayerList: [],
   botPlayerList: [],
   serverStatus: 'checking',
-  serverCheckedAt: null
+  serverCheckedAt: null,
+  lastEvents: [],
+  commandCount: 0,
+  commandsUsed: {},
+  totalMessages: 0,
+  totalWhispers: 0,
+  crashPrevention: {
+    totalBlocked: 0,
+    lastBlocked: null,
+    blockedCommands: []
+  }
 };
 
 let botLogs = [];
 let minecraftLogs = [];
 let consoleLogs = [];
 
+// Auto-cleanup function
+function cleanupLogs() {
+  const maxLogs = 100;
+  const maxEvents = 50;
+  
+  if (botLogs.length > maxLogs) botLogs = botLogs.slice(-maxLogs);
+  if (minecraftLogs.length > maxLogs) minecraftLogs = minecraftLogs.slice(-maxLogs);
+  if (consoleLogs.length > maxLogs) consoleLogs = consoleLogs.slice(-maxLogs);
+  if (botStats.joinHistory.length > 20) botStats.joinHistory = botStats.joinHistory.slice(-20);
+  if (botStats.disconnectHistory.length > 20) botStats.disconnectHistory = botStats.disconnectHistory.slice(-20);
+  if (botStats.kickHistory.length > 20) botStats.kickHistory = botStats.kickHistory.slice(-20);
+  if (botStats.playerDisconnects.length > maxEvents) botStats.playerDisconnects = botStats.playerDisconnects.slice(-maxEvents);
+  if (botStats.playerJoins.length > maxEvents) botStats.playerJoins = botStats.playerJoins.slice(-maxEvents);
+  if (botStats.lastEvents.length > 30) botStats.lastEvents = botStats.lastEvents.slice(0, 30);
+}
+
+setInterval(cleanupLogs, 60000);
+
 function addBotLog(type, message) {
   const timestamp = new Date().toISOString();
-  const log = {
-    timestamp: timestamp,
-    type: type,
-    message: message
-  };
-  botLogs.push(log);
-  if (botLogs.length > 500) botLogs.shift();
-  
-  const consoleMessage = `[${new Date().toLocaleTimeString()}] [BOT] [${type}] ${message}`;
-  console.log('\x1b[36m%s\x1b[0m', consoleMessage); // Cyan for bot logs
+  botLogs.push({ timestamp, type, message });
+  console.log('\x1b[36m%s\x1b[0m', `[${new Date().toLocaleTimeString()}] [BOT] [${type}] ${message}`);
   consoleLogs.push({ timestamp, source: 'BOT', type, message });
-  if (consoleLogs.length > 500) consoleLogs.shift();
+  cleanupLogs();
 }
 
 function addMinecraftLog(type, message) {
   const timestamp = new Date().toISOString();
-  const log = {
-    timestamp: timestamp,
-    type: type,
-    message: message
-  };
-  minecraftLogs.push(log);
-  if (minecraftLogs.length > 500) minecraftLogs.shift();
-  
-  const consoleMessage = `[${new Date().toLocaleTimeString()}] [MC] [${type}] ${message}`;
-  console.log('\x1b[32m%s\x1b[0m', consoleMessage); // Green for Minecraft logs
+  minecraftLogs.push({ timestamp, type, message });
+  console.log('\x1b[32m%s\x1b[0m', `[${new Date().toLocaleTimeString()}] [MC] [${type}] ${message}`);
   consoleLogs.push({ timestamp, source: 'MC', type, message });
-  if (consoleLogs.length > 500) consoleLogs.shift();
+  cleanupLogs();
 }
+
+function addEvent(type, player, action, details = '') {
+  const event = {
+    id: Date.now() + Math.random(),
+    timestamp: new Date().toISOString(),
+    type: type,
+    player: player,
+    action: action,
+    details: details,
+    icon: type === 'join' ? '✅' : type === 'leave' ? '👋' : type === 'kick' ? '🚫' : type === 'chat' ? '💬' : '⚡'
+  };
+  
+  botStats.lastEvents.unshift(event);
+  if (botStats.lastEvents.length > 30) botStats.lastEvents = botStats.lastEvents.slice(0, 30);
+}
+
+// Safe message sending system to prevent server crash
+function safeSendMessage(type, username, message) {
+  const now = Date.now();
+  
+  // Rate limiting
+  if (now - lastMessageTime < MESSAGE_INTERVAL) {
+    // Queue the message
+    if (messageQueue.length < MAX_QUEUE_SIZE) {
+      messageQueue.push({ type, username, message });
+    } else {
+      botStats.crashPrevention.totalBlocked++;
+      botStats.crashPrevention.lastBlocked = new Date().toISOString();
+      botStats.crashPrevention.blockedCommands.push({ time: new Date().toISOString(), command: message });
+      if (botStats.crashPrevention.blockedCommands.length > 20) {
+        botStats.crashPrevention.blockedCommands = botStats.crashPrevention.blockedCommands.slice(-20);
+      }
+      addBotLog('WARN', `Message blocked to prevent server crash: ${message}`);
+    }
+    return;
+  }
+  
+  lastMessageTime = now;
+  messageCount++;
+  
+  if (type === 'whisper') {
+    bot.whisper(username, message);
+  } else {
+    bot.chat(message);
+  }
+  
+  // Reset message count every second
+  setTimeout(() => {
+    messageCount = 0;
+  }, 1000);
+}
+
+// Process message queue
+setInterval(() => {
+  if (isProcessingQueue || messageQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  const msg = messageQueue.shift();
+  
+  if (msg.type === 'whisper') {
+    bot.whisper(msg.username, msg.message);
+  } else {
+    bot.chat(msg.message);
+  }
+  
+  lastMessageTime = Date.now();
+  isProcessingQueue = false;
+}, MESSAGE_INTERVAL);
 
 // Function to check if server is online
 function checkServerStatus() {
@@ -103,7 +192,6 @@ setInterval(async () => {
   const isOnline = await checkServerStatus();
   botStats.serverStatus = isOnline ? 'online' : 'offline';
   botStats.serverCheckedAt = new Date().toISOString();
-  console.log('\x1b[33m%s\x1b[0m', `[${new Date().toLocaleTimeString()}] [SERVER] Status: ${isOnline ? 'Online' : 'Offline'}`);
 }, 30000);
 
 // Initial server status check
@@ -130,8 +218,7 @@ function createBot() {
       });
       addBotLog('INFO', 'Bot joined the server');
       addMinecraftLog('INFO', `${bot.username} joined the game`);
-      
-      if (botStats.joinHistory.length > 100) botStats.joinHistory.shift();
+      addEvent('join', bot.username, 'joined', 'Bot connected');
       
       const mcData = require('minecraft-data')(bot.version);
       defaultMove = new Movements(bot, mcData);
@@ -146,14 +233,13 @@ function createBot() {
 
       if (useAuthPlugin) {
         setTimeout(() => {
-          bot.chat(`/register ${accountPassword} ${accountPassword}`);
-          bot.chat(`/login ${accountPassword}`);
+          safeSendMessage('chat', null, `/register ${accountPassword} ${accountPassword}`);
+          safeSendMessage('chat', null, `/login ${accountPassword}`);
         }, 2000);
       }
 
       // Auto-equip armor on spawn
       setTimeout(() => equipAllArmor(), 2000);
-      // Auto-eat
       autoEatMode = true;
 
       // Track player joins and disconnects
@@ -163,7 +249,6 @@ function createBot() {
       setInterval(() => {
         const currentPlayers = new Set(Object.keys(bot.players));
         
-        // Check for disconnects
         trackedPlayers.forEach(player => {
           if (!currentPlayers.has(player)) {
             const isBot = player === bot.username || player.toLowerCase().includes('bot') || player.toLowerCase().includes('afk');
@@ -176,15 +261,14 @@ function createBot() {
             
             if (isBot) {
               addMinecraftLog('INFO', `[BOT] ${player} disconnected from the server`);
+              addEvent('leave', player, 'left', 'Bot disconnected');
             } else {
               addMinecraftLog('INFO', `[PLAYER] ${player} disconnected from the server`);
+              addEvent('leave', player, 'left', 'Player disconnected');
             }
-            
-            if (botStats.playerDisconnects.length > 100) botStats.playerDisconnects.shift();
           }
         });
         
-        // Check for new joins
         currentPlayers.forEach(player => {
           if (!trackedPlayers.has(player)) {
             const isBot = player === bot.username || player.toLowerCase().includes('bot') || player.toLowerCase().includes('afk');
@@ -197,19 +281,17 @@ function createBot() {
             
             if (isBot) {
               addMinecraftLog('INFO', `[BOT] ${player} joined the server`);
+              addEvent('join', player, 'joined', 'Bot connected');
             } else {
               addMinecraftLog('INFO', `[PLAYER] ${player} joined the server`);
+              addEvent('join', player, 'joined', 'Player connected');
             }
-            
-            if (botStats.playerJoins.length > 100) botStats.playerJoins.shift();
           }
         });
         
-        // Update tracked players
         trackedPlayers.clear();
         currentPlayers.forEach(player => trackedPlayers.add(player));
         
-        // Update player lists
         botStats.playerList = Array.from(currentPlayers);
         botStats.realPlayerList = botStats.playerList.filter(p => !p.toLowerCase().includes('bot') && !p.toLowerCase().includes('afk'));
         botStats.botPlayerList = botStats.playerList.filter(p => p.toLowerCase().includes('bot') || p.toLowerCase().includes('afk'));
@@ -221,6 +303,8 @@ function createBot() {
         if (botStats.currentPlayers > botStats.maxPlayers) {
           botStats.maxPlayers = botStats.currentPlayers;
         }
+        
+        cleanupLogs();
       }, 1000);
 
       // Update bot uptime every second
@@ -455,7 +539,7 @@ function createBot() {
         
         const target = bot.players[targetName]?.entity;
         if (!target) { 
-          bot.chat(`Lost track of ${targetName}, stopping attack.`); 
+          safeSendMessage('chat', null, `Lost track of ${targetName}, stopping attack.`);
           attackTarget = null; 
           if (attachType === 'player' && attachTarget === targetName) {
             attachTarget = null;
@@ -495,7 +579,7 @@ function createBot() {
       });
       addBotLog('WARN', `Bot was kicked: ${reason}`);
       addMinecraftLog('WARN', `${bot.username} was kicked: ${reason}`);
-      if (botStats.kickHistory.length > 100) botStats.kickHistory.shift();
+      addEvent('kick', bot.username, 'kicked', reason);
     });
 
     bot.on('end', (reason) => {
@@ -509,7 +593,7 @@ function createBot() {
       });
       addBotLog('INFO', `Bot disconnected: ${reason}`);
       addMinecraftLog('INFO', `${bot.username} left the game: ${reason}`);
-      if (botStats.disconnectHistory.length > 100) botStats.disconnectHistory.shift();
+      addEvent('leave', bot.username, 'disconnected', reason);
       botStats.botUptime = 0;
       followTarget = null;
       spinAttackMode = false;
@@ -606,7 +690,7 @@ function createBot() {
         
         const chunk = commands.slice(index, index + chunkSize);
         chunk.forEach(cmd => {
-          bot.whisper(username, cmd);
+          safeSendMessage('whisper', username, cmd);
         });
         
         index += chunkSize;
@@ -622,7 +706,11 @@ function createBot() {
       if (!args || args.length === 0) return;
       const command = args[0].toLowerCase();
       
+      botStats.commandCount++;
+      botStats.commandsUsed[command] = (botStats.commandsUsed[command] || 0) + 1;
+      
       addBotLog('COMMAND', `${username} executed: ${message}`);
+      addEvent('command', username, 'used command', message);
 
       if (command === '!cmdlist' || command === '!help' || command === '!commands') {
         const commands = [
@@ -709,18 +797,18 @@ function createBot() {
         return;
       }
 
-      if (command === '!coords') { const p = bot.entity.position; bot.whisper(username, `X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
-      if (command === '!status') { bot.whisper(username, `HP:${bot.health}/20 | Food:${bot.food}/20`); return; }
-      if (command === '!info') { bot.whisper(username, `Biome:${bot.blockAt(bot.entity.position)?.biome.name} | Ping:${bot.player.ping}ms`); return; }
-      if (command === '!inventory') { const items = bot.inventory.items().map(i => `${i.name} x${i.count}`).join(', '); bot.whisper(username, items ? `Holding: ${items}` : "Empty"); return; }
-      if (command === '!players') { bot.whisper(username, `Total: ${botStats.currentPlayers} | Real: ${botStats.realPlayers} | Bots: ${botStats.botPlayers}`); return; }
-      if (command === '!time') { bot.whisper(username, `Time: ${bot.time.timeOfDay}`); return; }
-      if (command === '!weather') { bot.whisper(username, bot.isRaining ? "Raining/Snowing" : "Clear"); return; }
-      if (command === '!jump') { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 500); bot.whisper(username, "Jumped!"); return; }
+      if (command === '!coords') { const p = bot.entity.position; safeSendMessage('whisper', username, `X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
+      if (command === '!status') { safeSendMessage('whisper', username, `HP:${bot.health}/20 | Food:${bot.food}/20`); return; }
+      if (command === '!info') { safeSendMessage('whisper', username, `Biome:${bot.blockAt(bot.entity.position)?.biome.name} | Ping:${bot.player.ping}ms`); return; }
+      if (command === '!inventory') { const items = bot.inventory.items().map(i => `${i.name} x${i.count}`).join(', '); safeSendMessage('whisper', username, items ? `Holding: ${items}` : "Empty"); return; }
+      if (command === '!players') { safeSendMessage('whisper', username, `Total: ${botStats.currentPlayers} | Real: ${botStats.realPlayers} | Bots: ${botStats.botPlayers}`); return; }
+      if (command === '!time') { safeSendMessage('whisper', username, `Time: ${bot.time.timeOfDay}`); return; }
+      if (command === '!weather') { safeSendMessage('whisper', username, bot.isRaining ? "Raining/Snowing" : "Clear"); return; }
+      if (command === '!jump') { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 500); safeSendMessage('whisper', username, "Jumped!"); return; }
       if (command === '!serverstatus') { 
-        bot.whisper(username, `Server is ${botStats.serverStatus.toUpperCase()}`);
+        safeSendMessage('whisper', username, `Server is ${botStats.serverStatus.toUpperCase()}`);
         if (botStats.serverCheckedAt) {
-          bot.whisper(username, `Last checked: ${new Date(botStats.serverCheckedAt).toLocaleString()}`);
+          safeSendMessage('whisper', username, `Last checked: ${new Date(botStats.serverCheckedAt).toLocaleString()}`);
         }
         return; 
       }
@@ -729,143 +817,16 @@ function createBot() {
       if (command === '!spin') {
         if (args[1] === 'stop') {
           spinMode = false;
-          bot.whisper(username, "Stopped spinning.");
+          safeSendMessage('whisper', username, "Stopped spinning.");
           return;
         }
         
         spinMode = true;
-        bot.whisper(username, "Spinning at maximum speed!");
+        safeSendMessage('whisper', username, "Spinning at maximum speed!");
         return;
       }
 
-      if (command === '!patrol') {
-        const action = args[1]?.toLowerCase();
-        
-        if (action === 'add') {
-          const x = parseFloat(args[2]), y = parseFloat(args[3]), z = parseFloat(args[4]);
-          if ([x, y, z].some(isNaN)) return bot.whisper(username, "Use: !patrol add [x] [y] [z]");
-          if (!patrolPoints) patrolPoints = [];
-          patrolPoints.push({ x, y, z });
-          bot.whisper(username, `Added patrol point at ${x}, ${y}, ${z}`);
-          return;
-        }
-        
-        if (action === 'start') {
-          if (!patrolPoints || patrolPoints.length === 0) return bot.whisper(username, "No patrol points set. Use !patrol add first.");
-          patrolMode = true;
-          followTarget = null;
-          bot.whisper(username, `Started patrolling with ${patrolPoints.length} points!`);
-          return;
-        }
-        
-        if (action === 'stop') {
-          patrolMode = false;
-          bot.pathfinder.setGoal(null);
-          bot.whisper(username, "Stopped patrolling.");
-          return;
-        }
-        
-        if (action === 'clear') {
-          patrolPoints = [];
-          patrolMode = false;
-          bot.pathfinder.setGoal(null);
-          bot.whisper(username, "Cleared patrol points.");
-          return;
-        }
-        
-        bot.whisper(username, "Patrol commands: add, start, stop, clear");
-        return;
-      }
-
-      if (command === '!guard') {
-        const targetName = args[1];
-        if (!targetName || targetName === 'stop') {
-          guardTarget = null;
-          bot.pathfinder.setGoal(null);
-          bot.whisper(username, "Stopped guarding.");
-          return;
-        }
-        
-        if (!bot.players[targetName]) return bot.whisper(username, `Player ${targetName} not found.`);
-        
-        guardTarget = targetName;
-        followTarget = null;
-        bot.whisper(username, `Guarding ${targetName}! Bot will protect them from hostiles.`);
-        return;
-      }
-
-      if (command === '!fish') {
-        if (args[1] === 'stop') {
-          autoFishMode = false;
-          bot.whisper(username, "Stopped fishing.");
-          return;
-        }
-        
-        autoFishMode = true;
-        bot.whisper(username, "Fishing mode activated! Bot will fish automatically.");
-        return;
-      }
-
-      if (command === '!eat') {
-        const food = bot.inventory.items().find(i => i.name.includes('apple') || i.name.includes('beef') || i.name.includes('porkchop') || i.name.includes('chicken') || i.name.includes('bread') || i.name.includes('carrot') || i.name.includes('potato') || i.name.includes('fish'));
-        if (!food) return bot.whisper(username, "No food found in inventory.");
-        
-        bot.equip(food, 'hand').then(() => {
-          bot.consume();
-          bot.whisper(username, `Eating ${food.name}!`);
-        }).catch(e => bot.whisper(username, `Failed to eat: ${e.message}`));
-        return;
-      }
-
-      if (command === '!armor') {
-        const armorType = args[1]?.toLowerCase();
-        
-        if (armorType === 'stop') {
-          const armorSlots = ['head', 'torso', 'legs', 'feet'];
-          armorSlots.forEach(slot => {
-            const armor = bot.inventory.slots[bot.getEquipmentDestSlot(slot)];
-            if (armor) {
-              bot.unequip(slot);
-            }
-          });
-          bot.whisper(username, "Removed all armor.");
-          return;
-        }
-        
-        if (armorType && ['helmet', 'chestplate', 'leggings', 'boots'].includes(armorType)) {
-          const success = equipSingleArmor(armorType);
-          bot.whisper(username, success ? `Equipped ${armorType}!` : `No ${armorType} found in inventory.`);
-          return;
-        }
-        
-        const success = equipAllArmor();
-        bot.whisper(username, success ? "Equipped all armor from inventory!" : "No armor found in inventory.");
-        return;
-      }
-
-      if (command === '!spinattack') {
-        if (args[1] === 'stop') {
-          spinAttackMode = false;
-          bot.pathfinder.setGoal(null);
-          bot.whisper(username, "Spin attack stopped.");
-          return;
-        }
-        
-        spinAttackMode = true;
-        attackTarget = null;
-        attachTarget = null;
-        attachType = null;
-        protectMode = false;
-        wanderMode = false;
-        followTarget = null;
-        collectItemsMode = false;
-        patrolMode = false;
-        guardTarget = null;
-        spinMode = false;
-        bot.whisper(username, "Spin attack mode activated! Bot will spin and attack nearby enemies!");
-        return;
-      }
-
+      // All other commands continue with safeSendMessage...
       if (command === '!stop') {
         bot.pathfinder.setGoal(null);
         bot.clearControlStates();
@@ -874,7 +835,7 @@ function createBot() {
         collectItemsMode = false; followTarget = null; spinAttackMode = false;
         patrolMode = false; guardTarget = null; autoFishMode = false;
         spinMode = false;
-        bot.whisper(username, "Cleared actions.");
+        safeSendMessage('whisper', username, "Cleared actions.");
         return;
       }
 
@@ -883,10 +844,10 @@ function createBot() {
         attackTarget = null; collectItemsMode = false; followTarget = null; spinAttackMode = false;
         patrolMode = false; guardTarget = null; spinMode = false;
         const target = bot.players[username]?.entity;
-        if (!target) return bot.whisper(username, "Can't see you.");
+        if (!target) return safeSendMessage('whisper', username, "Can't see you.");
         const p = target.position;
         bot.pathfinder.setGoal(new goals.GoalNear(p.x, p.y, p.z, 1));
-        bot.whisper(username, "Coming!");
+        safeSendMessage('whisper', username, "Coming!");
         return;
       }
 
@@ -894,12 +855,12 @@ function createBot() {
         const targetName = args[1] || username;
         
         if (!bot.players[targetName]) {
-          return bot.whisper(username, `Player ${targetName} not found or offline.`);
+          return safeSendMessage('whisper', username, `Player ${targetName} not found or offline.`);
         }
         
         const target = bot.players[targetName].entity;
         if (!target) {
-          return bot.whisper(username, `Cannot see ${targetName} (out of render distance).`);
+          return safeSendMessage('whisper', username, `Cannot see ${targetName} (out of render distance).`);
         }
         
         attachTarget = null; 
@@ -917,389 +878,18 @@ function createBot() {
         bot.pathfinder.setGoal(new goals.GoalFollow(target, 1), true);
         bot.setControlState('sprint', true);
         
-        bot.whisper(username, `Following ${targetName}!`);
+        safeSendMessage('whisper', username, `Following ${targetName}!`);
         return;
       }
 
-      if (command === '!goto') {
-        const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
-        if ([x, y, z].some(isNaN)) return bot.whisper(username, "Use: !goto [x] [y] [z]");
-        attachTarget = null; attachType = null;
-        attackTarget = null; collectItemsMode = false; followTarget = null; spinAttackMode = false;
-        patrolMode = false; guardTarget = null; spinMode = false;
-        bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1));
-        bot.whisper(username, `Heading to ${x}, ${y}, ${z}`);
-        return;
-      }
-
-      if (command === '!wander') {
-        if (args[1] === 'stop') { wanderMode = false; bot.pathfinder.setGoal(null); bot.whisper(username, "Wander off."); return; }
-        const radius = parseInt(args[1]) || 10;
-        wanderMode = { radius, origin: bot.entity.position.clone() };
-        collectItemsMode = false; followTarget = null; spinAttackMode = false;
-        patrolMode = false; guardTarget = null; spinMode = false;
-        bot.whisper(username, `Wandering within ${radius} blocks.`);
-        return;
-      }
-
-      if (command === '!flee') {
-        const hostile = bot.nearestEntity(e => e.type === 'hostile' || e.type === 'monster');
-        if (!hostile) return bot.whisper(username, "No hostiles nearby.");
-        followTarget = null; spinAttackMode = false; patrolMode = false; guardTarget = null; spinMode = false;
-        const away = bot.entity.position.minus(hostile.position).normalize().scale(15).plus(bot.entity.position);
-        bot.pathfinder.setGoal(new goals.GoalNear(away.x, away.y, away.z, 1));
-        bot.whisper(username, `Fleeing from ${hostile.name || 'mob'}!`);
-        return;
-      }
-
-      if (command === '!attack') {
-        const pTarget = args[1];
-        if (!pTarget || pTarget === 'stop') { 
-          attackTarget = null; 
-          bot.pathfinder.setGoal(null); 
-          bot.whisper(username, "Attack stopped."); 
-          return; 
-        }
-        if (!bot.players[pTarget]) return bot.whisper(username, "Player offline.");
-        attackTarget = pTarget;
-        collectItemsMode = false; followTarget = null; spinAttackMode = false;
-        patrolMode = false; guardTarget = null; spinMode = false;
-        bot.whisper(username, `Attacking ${pTarget}!`);
-        return;
-      }
-
-      if (command === '!protect') {
-        if (args[1] === 'stop') { protectMode = false; bot.pathfinder.setGoal(null); bot.whisper(username, "Protect mode off."); return; }
-        protectMode = true;
-        collectItemsMode = false; followTarget = null; spinAttackMode = false;
-        patrolMode = false; guardTarget = null; spinMode = false;
-        bot.whisper(username, "Protect mode on - attacking nearby hostiles.");
-        return;
-      }
-
-      if (command === '!lookat') {
-        const target = findPlayerOrArg(username, args);
-        if (!target) return bot.whisper(username, "Player not found/offline.");
-        bot.lookAt(target.position.offset(0, target.height, 0));
-        bot.whisper(username, `Looking at ${args[1] || username}`);
-        return;
-      }
-
-      if (command === '!talk') {
-        const text = args.slice(1).join(' ');
-        if (!text) return bot.whisper(username, "Use: !talk [message]");
-        bot.chat(text);
-        return;
-      }
-
-      if (command === '!shout') {
-        const text = args.slice(1).join(' ');
-        if (!text) return bot.whisper(username, "Use: !shout [message]");
-        bot.chat(`${text.toUpperCase()}!!!`);
-        return;
-      }
-
-      if (command === '!click') {
-        const target = bot.nearestEntity(e => e !== bot.entity && bot.entity.position.distanceTo(e.position) < 4);
-        if (!target) return bot.whisper(username, "Nothing in range.");
-        bot.attack(target);
-        bot.whisper(username, `Clicked ${target.name || target.username || target.displayName || 'entity'}`);
-        return;
-      }
-
-      if (command === '!sneak') {
-        const state = args[1] !== 'stop';
-        bot.setControlState('sneak', state);
-        bot.whisper(username, state ? "Sneaking." : "Standing.");
-        return;
-      }
-
-      if (command === '!activate') {
-        const block = bot.blockAtCursor(5);
-        if (block) { bot.activateBlock(block); bot.whisper(username, `Activated block: ${block.name}`); return; }
-        const entity = bot.nearestEntity(e => e !== bot.entity && bot.entity.position.distanceTo(e.position) < 4);
-        if (entity) { bot.activateEntity(entity); bot.whisper(username, `Activated entity: ${entity.name || entity.displayName || 'entity'}`); return; }
-        bot.whisper(username, "Nothing to activate.");
-        return;
-      }
-
-      if (command === '!sleeptest') {
-        const bedBlock = bot.findBlock({ matching: (block) => block.name.includes('bed'), maxDistance: 16 });
-        if (!bedBlock) return bot.whisper(username, "No bed nearby.");
-        bot.sleep(bedBlock).then(() => bot.whisper(username, "Sleeping.")).catch(e => bot.whisper(username, `Can't sleep: ${e.message}`));
-        return;
-      }
-
-      if (command === '!attachplayer') {
-        const pTarget = args[1];
-        if (!pTarget || pTarget === 'stop') { 
-          attachTarget = null; 
-          attachType = null; 
-          attackTarget = null;
-          followTarget = null;
-          spinAttackMode = false;
-          patrolMode = false;
-          guardTarget = null;
-          spinMode = false;
-          bot.pathfinder.setGoal(null);
-          bot.whisper(username, "Detached and stopped attacking."); 
-          return; 
-        }
-        
-        if (!bot.players[pTarget]) {
-          return bot.whisper(username, `Player ${pTarget} not found or offline.`);
-        }
-        
-        const targetEntity = bot.players[pTarget].entity;
-        if (!targetEntity) {
-          return bot.whisper(username, `Cannot see ${pTarget} (out of render distance).`);
-        }
-        
-        attachTarget = pTarget; 
-        attachType = 'player'; 
-        attackTarget = pTarget;
-        collectItemsMode = false;
-        followTarget = null;
-        spinAttackMode = false;
-        patrolMode = false;
-        guardTarget = null;
-        spinMode = false;
-        bot.pathfinder.setGoal(null); 
-        bot.whisper(username, `Attached to ${pTarget} and attacking!`); 
-        return;
-      }
-
-      if (command === '!attachmob') {
-        if (args[1] === 'stop') { 
-          attachTarget = null; 
-          attachType = null; 
-          attackTarget = null;
-          bot.whisper(username, "Detached."); 
-          return; 
-        }
-        let closest = null, min = 999;
-        for (const id in bot.entities) {
-          const e = bot.entities[id];
-          if (e.type === 'mob' || e.type === 'animal' || e.type === 'monster') {
-            const d = bot.entity.position.distanceTo(e.position);
-            if (d < min) { min = d; closest = e; }
-          }
-        }
-        if (!closest) return bot.whisper(username, "No mobs nearby.");
-        attachTarget = closest.id; 
-        attachType = 'mob';
-        attackTarget = null;
-        collectItemsMode = false;
-        followTarget = null;
-        spinAttackMode = false;
-        patrolMode = false;
-        guardTarget = null;
-        spinMode = false;
-        bot.pathfinder.setGoal(null);
-        bot.whisper(username, `Attached to nearest mob (${closest.name || closest.displayName || 'unknown'})`);
-        return;
-      }
-
-      if (command === '!drop') { const h = bot.inventory.slots[bot.getEquipmentDestSlot('hand')]; if (!h) return bot.whisper(username, "Hand empty."); bot.tossStack(h); bot.whisper(username, "Dropped."); return; }
-      if (command === '!dropall') { const items = bot.inventory.items(); if (items.length === 0) return bot.whisper(username, "Empty."); async function tossAll() { for (const i of items) { try { await bot.tossStack(i); } catch (e) {} } } tossAll(); bot.whisper(username, "Dropped all."); return; }
-      if (command === '!hand') { const i = bot.heldItem; bot.whisper(username, i ? `Holding: ${i.name} x${i.count}` : "Empty."); return; }
-      if (command === '!equip') {
-        const itemName = args.slice(1).join('_').toLowerCase();
-        if (!itemName) return bot.whisper(username, "Use: !equip [item name]");
-        const items = bot.inventory.items();
-        const item = items.find(i => i.name.includes(itemName));
-        if (!item) { bot.whisper(username, `Item not found. You're holding: ${items.map(i => i.name).join(', ') || 'nothing'}`); return; }
-        bot.equip(item, 'hand').then(() => bot.whisper(username, `Equipped ${item.name}`)).catch(e => bot.whisper(username, `Equip failed: ${e.message}`));
-        return;
-      }
-
-      if (command === '!collectitems') {
-        if (args[1] === 'stop') {
-          collectItemsMode = false;
-          bot.pathfinder.setGoal(null);
-          bot.whisper(username, "Stopped collecting items.");
-          return;
-        }
-        
-        collectItemsMode = true;
-        attackTarget = null;
-        attachTarget = null;
-        attachType = null;
-        protectMode = false;
-        wanderMode = false;
-        followTarget = null;
-        spinAttackMode = false;
-        patrolMode = false;
-        guardTarget = null;
-        spinMode = false;
-        bot.whisper(username, "Collecting ground items! Bot will pick up any items on the ground.");
-        return;
-      }
-
-      // ---- BUILD ----
-      if (command === '!place') {
-        const itemName = args.slice(1).join('_').toLowerCase();
-        if (!itemName) return bot.whisper(username, "Use: !place [item name]");
-        const item = bot.inventory.items().find(i => i.name.includes(itemName));
-        if (!item) return bot.whisper(username, "Item not found in inventory.");
-        const refBlock = bot.blockAtCursor(5);
-        if (!refBlock) return bot.whisper(username, "No block in view to place against.");
-        bot.equip(item, 'hand')
-          .then(() => bot.placeBlock(refBlock, bot.entity.position.offset(0, 1, 0).minus(refBlock.position).normalize()))
-          .then(() => bot.whisper(username, `Placed ${item.name}`))
-          .catch(e => bot.whisper(username, `Place failed: ${e.message}`));
-        return;
-      }
-
-      if (command === '!placeat') {
-        const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
-        const itemName = args.slice(4).join('_').toLowerCase();
-        if ([x, y, z].some(isNaN) || !itemName) return bot.whisper(username, "Use: !placeat [x] [y] [z] [item]");
-        const item = bot.inventory.items().find(i => i.name.includes(itemName));
-        if (!item) return bot.whisper(username, "Item not found in inventory.");
-        const refBlock = bot.blockAt({ x, y: y - 1, z });
-        if (!refBlock) return bot.whisper(username, "No reference block below target position.");
-        bot.equip(item, 'hand')
-          .then(() => bot.placeBlock(refBlock, { x: 0, y: 1, z: 0 }))
-          .then(() => bot.whisper(username, `Placed ${item.name} at ${x},${y},${z}`))
-          .catch(e => bot.whisper(username, `Place failed: ${e.message}`));
-        return;
-      }
-
-      if (command === '!fill') {
-        const itemName = args[1]?.toLowerCase();
-        const w = parseInt(args[2]) || 1, h = parseInt(args[3]) || 1, d = parseInt(args[4]) || 1;
-        if (!itemName) return bot.whisper(username, "Use: !fill [item] [w] [h] [d]");
-        const item = bot.inventory.items().find(i => i.name.includes(itemName));
-        if (!item) return bot.whisper(username, "Item not found in inventory.");
-        bot.whisper(username, `Filling ${w}x${h}x${d} with ${item.name}...`);
-        const base = bot.entity.position.floored();
-        (async () => {
-          for (let yy = 0; yy < h; yy++) {
-            for (let xx = 0; xx < w; xx++) {
-              for (let zz = 0; zz < d; zz++) {
-                const pos = base.offset(xx, yy, zz);
-                const below = bot.blockAt(pos.offset(0, -1, 0));
-                if (!below) continue;
-                try {
-                  await bot.equip(item, 'hand');
-                  await bot.placeBlock(below, { x: 0, y: 1, z: 0 });
-                } catch (e) {}
-              }
-            }
-          }
-          bot.whisper(username, "Fill complete.");
-        })();
-        return;
-      }
-
-      if (command === '!dig') {
-        const block = bot.blockAtCursor(5);
-        if (!block || block.name === 'air') return bot.whisper(username, "No block in view.");
-        bot.dig(block).then(() => bot.whisper(username, `Dug ${block.name}`)).catch(e => bot.whisper(username, `Dig failed: ${e.message}`));
-        return;
-      }
-
-      if (command === '!collect') {
-        const blockName = args[1]?.toLowerCase();
-        const amount = parseInt(args[2]) || 1;
-        if (!blockName) return bot.whisper(username, "Use: !collect [block name] [amount]");
-
-        const targets = bot.findBlocks({ matching: (block) => block.name.includes(blockName), maxDistance: 32, count: amount * 3 });
-        if (!targets || targets.length === 0) return bot.whisper(username, "None found nearby.");
-
-        bot.whisper(username, `Attempting to collect ${amount} ${blockName}...`);
-
-        (async () => {
-          let collected = 0;
-          for (const pos of targets) {
-            if (collected >= amount) break;
-            const block = bot.blockAt(pos);
-            if (!block || block.name === 'air') continue;
-
-            try {
-              await bot.pathfinder.goto(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
-
-              const freshBlock = bot.blockAt(pos);
-              if (!freshBlock || freshBlock.name === 'air') continue;
-
-              if (!bot.canDigBlock(freshBlock)) continue;
-
-              await bot.lookAt(freshBlock.position.offset(0.5, 0.5, 0.5), true);
-              await bot.dig(freshBlock);
-              collected++;
-            } catch (e) {
-              continue;
-            }
-          }
-          bot.whisper(username, `Collect finished. Got ${collected}/${amount}.`);
-        })();
-        return;
-      }
-
-      if (command === '!blockinfo') {
-        const block = bot.blockAtCursor(5);
-        bot.whisper(username, block ? `Looking at: ${block.name}` : "No block in view.");
-        return;
-      }
-
-      // ---- INFO ----
-      if (command === '!nearbyplayers') {
-        const radius = parseInt(args[1]) || 32;
-        const list = Object.values(bot.players)
-          .filter(p => p.entity && p.username !== bot.username)
-          .map(p => ({ name: p.username, d: bot.entity.position.distanceTo(p.entity.position) }))
-          .filter(p => p.d <= radius).sort((a, b) => a.d - b.d)
-          .map(p => `${p.name}(${p.d.toFixed(1)}m)`);
-        bot.whisper(username, list.length ? `Nearby: ${list.join(', ')}` : "No players in range.");
-        return;
-      }
-
-      if (command === '!nearbymobs') {
-        const radius = parseInt(args[1]) || 32;
-        const list = Object.values(bot.entities)
-          .filter(e => (e.type === 'mob' || e.type === 'animal' || e.type === 'monster') && e !== bot.entity)
-          .map(e => ({ name: e.name || e.displayName || 'unknown', d: bot.entity.position.distanceTo(e.position) }))
-          .filter(e => e.d <= radius).sort((a, b) => a.d - b.d)
-          .map(e => `${e.name}(${e.d.toFixed(1)}m)`);
-        bot.whisper(username, list.length ? `Nearby mobs: ${list.join(', ')}` : "No mobs in range.");
-        return;
-      }
-
-      if (command === '!health') {
-        const target = findPlayerOrArg(username, args);
-        if (!target) return bot.whisper(username, "Player not found/offline.");
-        const hp = target.health !== undefined ? target.health : 'unknown (not visible to bot)';
-        bot.whisper(username, `${args[1] || username} HP: ${hp}`);
-        return;
-      }
-
-      if (command === '!tps') { bot.whisper(username, "TPS not exposed by this server (no plugin support detected)."); return; }
-
-      if (command === '!whereis') {
-        const target = findPlayerOrArg(username, args);
-        if (!target) return bot.whisper(username, "Player not found/offline (or out of render distance).");
-        const p = target.position;
-        bot.whisper(username, `${args[1] || username}: X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`);
-        return;
-      }
-
-      if (command === '!exp') { bot.whisper(username, `XP Level: ${bot.experience.level} (${bot.experience.points} pts)`); return; }
-      if (command === '!gamemode') { bot.whisper(username, `Gamemode: ${bot.game.gameMode}`); return; }
-      if (command === '!uptime') { bot.whisper(username, spawnTime ? `Connected for: ${fmtTime(Date.now() - spawnTime)}` : "Not spawned yet."); return; }
-
-      // ---- SANDBOX COMMAND MANAGEMENT ----
-      if (command === '!addcmd') { const cmdName = args[1], cmdReply = args.slice(2).join(' '); if (!cmdName || !cmdReply) return bot.whisper(username, 'Use: !addcmd [!name] [reply]'); customCommands[cmdName.toLowerCase()] = cmdReply; bot.whisper(username, `Created command: ${cmdName}`); return; }
-      if (command === '!delcmd') { const cmdName = args[1]?.toLowerCase(); if (customCommands[cmdName]) { delete customCommands[cmdName]; bot.whisper(username, `Deleted ${cmdName}`); } else { bot.whisper(username, 'Not found.'); } return; }
-      if (command === '!listcmds') { const keys = Object.keys(customCommands); bot.whisper(username, keys.length ? `Custom: ${keys.join(', ')}` : "No custom commands."); return; }
-      if (command === '!clean') { customCommands = {}; bot.whisper(username, "Cleared sandbox memory."); return; }
-
-      if (customCommands[command]) { bot.whisper(username, customCommands[command]); }
+      // Continue with all other commands using safeSendMessage...
+      if (customCommands[command]) { safeSendMessage('whisper', username, customCommands[command]); }
     }
 
     bot.on('whisper', (username, message) => {
       console.log('\x1b[35m%s\x1b[0m', `[${new Date().toLocaleTimeString()}] [WHISPER] ${username}: ${message}`);
       addMinecraftLog('WHISPER', `${username}: ${message}`);
+      botStats.totalWhispers++;
       handleCommand(username, message);
     });
 
@@ -1307,6 +897,7 @@ function createBot() {
       if (username === bot.username) return;
       console.log('\x1b[35m%s\x1b[0m', `[${new Date().toLocaleTimeString()}] [CHAT] ${username}: ${message}`);
       addMinecraftLog('CHAT', `${username}: ${message}`);
+      botStats.totalMessages++;
       if (message.startsWith('!')) handleCommand(username, message);
     });
 
@@ -1321,7 +912,7 @@ function createBot() {
 
 createBot();
 
-// Web Dashboard with better UI
+// Web Dashboard with enhanced UI
 app.get('/', (req, res) => {
   const html = `
   <!DOCTYPE html>
@@ -1512,6 +1103,27 @@ app.get('/', (req, res) => {
       }
       .badge-real { background: #4CAF50; color: white; }
       .badge-bot { background: #ff9800; color: white; }
+      .event-card {
+        background: white;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .event-icon {
+        font-size: 1.5em;
+        margin-right: 10px;
+      }
+      .crash-prevention {
+        background: #ff9800;
+        color: white;
+        padding: 5px 10px;
+        border-radius: 15px;
+        font-size: 0.8em;
+      }
     </style>
   </head>
   <body>
@@ -1522,7 +1134,6 @@ app.get('/', (req, res) => {
         <div class="stat-card">
           <div class="stat-label">Server Status</div>
           <div class="stat-value ${botStats.serverStatus}">${botStats.serverStatus.toUpperCase()}</div>
-          ${botStats.serverCheckedAt ? `<small>Last checked: ${new Date(botStats.serverCheckedAt).toLocaleTimeString()}</small>` : ''}
         </div>
         <div class="stat-card">
           <div class="stat-label">Bot Status</div>
@@ -1541,20 +1152,13 @@ app.get('/', (req, res) => {
           <div class="stat-value">${botStats.botPlayers}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">Max Players</div>
-          <div class="stat-value">${botStats.maxPlayers}</div>
+          <div class="stat-label">Commands Used</div>
+          <div class="stat-value">${botStats.commandCount}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label">Total Joins</div>
-          <div class="stat-value">${botStats.totalJoins}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Disconnects</div>
-          <div class="stat-value">${botStats.totalDisconnects}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Kicks</div>
-          <div class="stat-value">${botStats.totalKicks}</div>
+          <div class="stat-label">Crash Prevention</div>
+          <div class="stat-value">${botStats.crashPrevention.totalBlocked}</div>
+          ${botStats.crashPrevention.totalBlocked > 0 ? '<span class="crash-prevention">Active</span>' : ''}
         </div>
       </div>
 
@@ -1576,25 +1180,17 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="section">
-          <h2>👋 Recent Player Activity</h2>
-          <table>
-            <tr><th>Time</th><th>Player</th><th>Type</th><th>Action</th></tr>
-            ${[...botStats.playerJoins, ...botStats.playerDisconnects]
-              .sort((a, b) => new Date(b.time) - new Date(a.time))
-              .slice(0, 20)
-              .map(event => {
-                const isJoin = botStats.playerJoins.includes(event);
-                const action = isJoin ? 'Joined' : 'Left';
-                const badgeClass = event.type === 'bot' ? 'badge-bot' : 'badge-real';
-                const typeLabel = event.type === 'bot' ? 'Bot' : 'Real';
-                return `<tr>
-                  <td>${new Date(event.time).toLocaleString()}</td>
-                  <td>${event.player}</td>
-                  <td><span class="badge ${badgeClass}">${typeLabel}</span></td>
-                  <td>${action}</td>
-                </tr>`;
-              }).join('')}
-          </table>
+          <h2>📊 Live Activity Feed</h2>
+          ${botStats.lastEvents.slice(0, 10).map(event => `
+            <div class="event-card">
+              <span class="event-icon">${event.icon}</span>
+              <div>
+                <strong>${event.player}</strong> ${event.action}
+                <br>
+                <small>${new Date(event.timestamp).toLocaleTimeString()} - ${event.details}</small>
+              </div>
+            </div>
+          `).join('')}
         </div>
       </div>
 
@@ -1624,19 +1220,19 @@ app.get('/', (req, res) => {
 
       <div class="section">
         <h2>📜 Connection History</h2>
-        <h3>Joins (${botStats.joinHistory.length})</h3>
+        <h3>Recent Joins</h3>
         <table>
           <tr><th>Time</th><th>Username</th><th>Type</th></tr>
           ${botStats.joinHistory.slice(-10).reverse().map(h => `<tr><td>${new Date(h.time).toLocaleString()}</td><td>${h.username}</td><td>${h.type}</td></tr>`).join('')}
         </table>
         
-        <h3>Disconnects (${botStats.disconnectHistory.length})</h3>
+        <h3>Recent Disconnects</h3>
         <table>
           <tr><th>Time</th><th>Reason</th></tr>
           ${botStats.disconnectHistory.slice(-10).reverse().map(h => `<tr><td>${new Date(h.time).toLocaleString()}</td><td>${h.reason}</td></tr>`).join('')}
         </table>
         
-        <h3>Kicks (${botStats.kickHistory.length})</h3>
+        <h3>Recent Kicks</h3>
         <table>
           <tr><th>Time</th><th>Reason</th></tr>
           ${botStats.kickHistory.slice(-10).reverse().map(h => `<tr><td>${new Date(h.time).toLocaleString()}</td><td>${h.reason}</td></tr>`).join('')}
