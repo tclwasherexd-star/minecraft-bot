@@ -77,17 +77,29 @@ function createBot() {
       bot.pathfinder.setGoal(new goals.GoalNear(origin.x + dx, origin.y, origin.z + dz, 1));
     }, 8000);
 
-    // Stuck Detector
+    // Stuck Detector - jumps + pushes forward if bot has an active goal but isn't progressing
     let lastPos = null;
+    let stuckTicks = 0;
     setInterval(() => {
-      if (!bot.pathfinder.isMoving()) { lastPos = null; return; }
+      const hasGoal = bot.pathfinder.goal !== null && bot.pathfinder.goal !== undefined;
+      if (!hasGoal) { lastPos = null; stuckTicks = 0; return; }
+
       const pos = bot.entity.position;
-      if (lastPos && pos.distanceTo(lastPos) < 0.1) {
-        bot.setControlState('jump', true);
-        setTimeout(() => bot.setControlState('jump', false), 250);
+      if (lastPos && pos.distanceTo(lastPos) < 0.15) {
+        stuckTicks++;
+        if (stuckTicks >= 1) {
+          bot.setControlState('forward', true);
+          bot.setControlState('jump', true);
+          setTimeout(() => {
+            bot.setControlState('jump', false);
+          }, 300);
+        }
+      } else {
+        stuckTicks = 0;
+        bot.setControlState('forward', false);
       }
       lastPos = pos.clone();
-    }, 1000);
+    }, 500);
   });
 
   bot.on('message', (jsonMsg) => {
@@ -382,19 +394,35 @@ function createBot() {
       const blockName = args[1]?.toLowerCase();
       const amount = parseInt(args[2]) || 1;
       if (!blockName) return bot.whisper(username, "Use: !collect [block name] [amount]");
-      const targets = bot.findBlocks({ matching: (block) => block.name.includes(blockName), maxDistance: 32, count: amount });
+
+      const targets = bot.findBlocks({ matching: (block) => block.name.includes(blockName), maxDistance: 32, count: amount * 3 });
       if (!targets || targets.length === 0) return bot.whisper(username, "None found nearby.");
-      bot.whisper(username, `Collecting ${targets.length} ${blockName}...`);
+
+      bot.whisper(username, `Attempting to collect ${amount} ${blockName}...`);
+
       (async () => {
+        let collected = 0;
         for (const pos of targets) {
+          if (collected >= amount) break;
           const block = bot.blockAt(pos);
-          if (!block) continue;
+          if (!block || block.name === 'air') continue;
+
           try {
-            await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
-            await bot.dig(block);
-          } catch (e) {}
+            await bot.pathfinder.goto(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
+
+            const freshBlock = bot.blockAt(pos);
+            if (!freshBlock || freshBlock.name === 'air') continue;
+
+            if (!bot.canDigBlock(freshBlock)) continue;
+
+            await bot.lookAt(freshBlock.position.offset(0.5, 0.5, 0.5), true);
+            await bot.dig(freshBlock);
+            collected++;
+          } catch (e) {
+            continue;
+          }
         }
-        bot.whisper(username, "Collect finished.");
+        bot.whisper(username, `Collect finished. Got ${collected}/${amount}.`);
       })();
       return;
     }
