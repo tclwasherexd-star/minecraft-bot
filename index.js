@@ -304,6 +304,8 @@ function createBot() {
       "!tpbring - TP bot to you",
       "!tp [player] - TP to player",
       "!call - TP you to bot",
+      "!skydrivebot - Make bot fly to sky",
+      "!skydriveplayers - Make players fly to sky",
       "",
       "COMBAT COMMANDS:",
       "!attack [p] - Attack player",
@@ -407,27 +409,41 @@ function createBot() {
     }
 
     if (command === '!tpbring') {
-      const target = bot.players[username]?.entity;
-      if (!target) return safeWhisper(username, "Can't see you.");
-      bot.entity.position = target.position.clone();
-      safeWhisper(username, "Teleported to you!");
+      const player = bot.players[username];
+      
+      if (!player) {
+        return safeWhisper(username, "Cannot find you in player list.");
+      }
+      
+      if (player.entity && player.entity.position) {
+        bot.entity.position = player.entity.position.clone();
+        safeWhisper(username, "Teleported bot to you!");
+        return;
+      }
+      
+      bot.chat(`/tp ${bot.username} ${username}`);
+      safeWhisper(username, "Attempting to teleport bot to you...");
       return;
     }
 
     if (command === '!tp') {
       const targetName = args[1];
       if (!targetName) return safeWhisper(username, "Use: !tp [playername]");
-      if (!bot.players[targetName]) return safeWhisper(username, `Player ${targetName} not found or offline.`);
-      const target = bot.players[targetName].entity;
-      if (!target) return safeWhisper(username, `Cannot see ${targetName} (out of render distance).`);
-      bot.entity.position = target.position.clone();
-      safeWhisper(username, `Teleported to ${targetName}!`);
+      
+      const player = bot.players[targetName];
+      if (!player) return safeWhisper(username, `Player ${targetName} not found or offline.`);
+      
+      if (player.entity && player.entity.position) {
+        bot.entity.position = player.entity.position.clone();
+        safeWhisper(username, `Teleported to ${targetName}!`);
+      } else {
+        bot.chat(`/tp ${bot.username} ${targetName}`);
+        safeWhisper(username, `Attempting to teleport to ${targetName}...`);
+      }
       return;
     }
 
     if (command === '!call') {
-      const target = bot.players[username]?.entity;
-      if (!target) return safeWhisper(username, "Can't see you.");
       const botPos = bot.entity.position;
       bot.chat(`/tp ${username} ${Math.round(botPos.x)} ${Math.round(botPos.y)} ${Math.round(botPos.z)}`);
       safeWhisper(username, "Attempting to teleport you to me!");
@@ -447,9 +463,34 @@ function createBot() {
       return;
     }
 
+    // KILLBOT
     if (command === '!killbot') {
       bot.chat('/kill');
       safeWhisper(username, "Killing bot...");
+      return;
+    }
+
+    // SKYDRIVEBOT - Makes bot fly to sky
+    if (command === '!skydrivebot') {
+      bot.chat('/effect give ' + bot.username + ' minecraft:levitation 30 50');
+      safeWhisper(username, "Bot is flying to the sky!");
+      return;
+    }
+
+    // SKYDRIVEPLAYERS - Makes all players fly to sky
+    if (command === '!skydriveplayers') {
+      const targetName = args[1];
+      if (targetName) {
+        bot.chat('/effect give ' + targetName + ' minecraft:levitation 30 50');
+        safeWhisper(username, `${targetName} is flying to the sky!`);
+      } else {
+        Object.keys(bot.players).forEach(playerName => {
+          if (playerName !== bot.username) {
+            bot.chat('/effect give ' + playerName + ' minecraft:levitation 30 50');
+          }
+        });
+        safeWhisper(username, "All players are flying to the sky!");
+      }
       return;
     }
 
@@ -1074,7 +1115,7 @@ function createBot() {
   });
 }
 
-// Simple dashboard
+// Fixed website dashboard
 app.get('/', (req, res) => {
   const playerCount = bot ? Object.keys(bot.players).length : 0;
   const health = bot ? bot.health : 0;
