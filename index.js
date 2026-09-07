@@ -8,7 +8,7 @@ const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK
 
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
-let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null, protectMode = false, attackTarget = null, wanderMode = false, spawnTime = null, collectItemsMode = false, followTarget = null, spinAttackMode = false;
+let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null, protectMode = false, attackTarget = null, wanderMode = false, spawnTime = null, collectItemsMode = false, followTarget = null, spinAttackMode = false, patrolMode = false, guardTarget = null, autoEatMode = false, autoFishMode = false;
 
 // Statistics and logs tracking
 let botStats = {
@@ -134,14 +134,15 @@ function createBot() {
       }
 
       // Auto-equip armor on spawn
-      setTimeout(() => equipArmor(), 2000);
+      setTimeout(() => equipAllArmor(), 2000);
+      // Auto-eat if enabled
+      autoEatMode = true;
 
       // Track player disconnects
       const trackedPlayers = new Set(Object.keys(bot.players));
       setInterval(() => {
         const currentPlayers = new Set(Object.keys(bot.players));
         
-        // Check for disconnects
         trackedPlayers.forEach(player => {
           if (!currentPlayers.has(player) && player !== bot.username) {
             botStats.playerDisconnects.push({
@@ -154,18 +155,15 @@ function createBot() {
           }
         });
         
-        // Check for new joins
         currentPlayers.forEach(player => {
           if (!trackedPlayers.has(player) && player !== bot.username) {
             addMinecraftLog('INFO', `${player} joined the server`);
           }
         });
         
-        // Update tracked players
         trackedPlayers.clear();
         currentPlayers.forEach(player => trackedPlayers.add(player));
         
-        // Update player list
         botStats.playerList = Array.from(currentPlayers).filter(p => p !== bot.username);
         botStats.currentPlayers = botStats.playerList.length;
         if (botStats.currentPlayers > botStats.maxPlayers) {
@@ -180,7 +178,133 @@ function createBot() {
         }
       }, 1000);
 
-      // IMPROVED FOLLOW SYSTEM - No delay, instant following
+      // Auto-eat system
+      setInterval(() => {
+        if (!autoEatMode || !bot.food) return;
+        if (bot.food < 18) {
+          const food = bot.inventory.items().find(i => i.name.includes('apple') || i.name.includes('beef') || i.name.includes('porkchop') || i.name.includes('chicken') || i.name.includes('bread') || i.name.includes('carrot') || i.name.includes('potato') || i.name.includes('fish'));
+          if (food) {
+            bot.equip(food, 'hand').then(() => {
+              bot.consume();
+              addBotLog('INFO', `Auto-eating ${food.name}`);
+            }).catch(() => {});
+          }
+        }
+      }, 5000);
+
+      // Auto-fish system
+      setInterval(() => {
+        if (!autoFishMode) return;
+        const fishingRod = bot.inventory.items().find(i => i.name.includes('fishing_rod'));
+        if (fishingRod && !bot.fishing) {
+          bot.equip(fishingRod, 'hand').then(() => {
+            bot.fish();
+          }).catch(() => {});
+        }
+      }, 10000);
+
+      // Guard mode
+      setInterval(() => {
+        if (!guardTarget) return;
+        const target = bot.players[guardTarget]?.entity;
+        if (!target) return;
+        
+        const hostile = bot.nearestEntity(e => (e.type === 'hostile' || e.type === 'monster') && e.position.distanceTo(target.position) < 10);
+        if (hostile) {
+          bot.pathfinder.setGoal(new goals.GoalFollow(hostile, 2), true);
+          if (bot.entity.position.distanceTo(hostile.position) < 3) bot.attack(hostile);
+        } else {
+          bot.pathfinder.setGoal(new goals.GoalFollow(target, 3), true);
+        }
+      }, 1000);
+
+      // Patrol mode
+      let patrolPoints = [];
+      let currentPatrolIndex = 0;
+      setInterval(() => {
+        if (!patrolMode || patrolPoints.length === 0) return;
+        
+        if (!bot.pathfinder.isMoving()) {
+          const point = patrolPoints[currentPatrolIndex];
+          bot.pathfinder.setGoal(new goals.GoalNear(point.x, point.y, point.z, 1));
+          currentPatrolIndex = (currentPatrolIndex + 1) % patrolPoints.length;
+        }
+      }, 3000);
+
+      // IMPROVED WALKING - Smart movement system
+      setInterval(() => {
+        const isMoving = bot.pathfinder.isMoving();
+        const hasGoal = bot.pathfinder.goal !== null;
+        
+        if (isMoving && hasGoal && !attachTarget && !followTarget) {
+          const pos = bot.entity.position;
+          const blockBelow = bot.blockAt(pos.offset(0, -1, 0));
+          const blockAhead = bot.blockAt(pos.offset(0, 0, 1));
+          const blockAbove = bot.blockAt(pos.offset(0, 2, 0));
+          
+          if (!blockBelow || blockBelow.name === 'air' || blockBelow.name === 'cave_air' || blockBelow.name === 'void_air') {
+            bot.setControlState('jump', false);
+            bot.setControlState('sneak', true);
+          } else {
+            bot.setControlState('sneak', false);
+            bot.setControlState('jump', true);
+          }
+          
+          if (blockAhead && blockAhead.name !== 'air' && blockAhead.name !== 'cave_air' && blockAhead.name !== 'void_air' && blockAhead.name !== 'water' && blockAhead.name !== 'lava') {
+            bot.setControlState('jump', true);
+            bot.setControlState('forward', true);
+          }
+          
+          if (blockAbove && blockAbove.name !== 'air' && blockAbove.name !== 'cave_air' && blockAbove.name !== 'void_air') {
+            if (bot.canDigBlock(blockAbove)) {
+              bot.dig(blockAbove);
+            }
+          }
+        }
+      }, 100);
+
+      // Stuck Detector with improved logic
+      let lastPos = null;
+      let stuckCount = 0;
+      setInterval(() => {
+        const hasGoal = bot.pathfinder.goal !== null && bot.pathfinder.goal !== undefined;
+        if (!hasGoal) { 
+          lastPos = null; 
+          stuckCount = 0;
+          bot.setControlState('forward', false);
+          bot.setControlState('jump', false);
+          return; 
+        }
+
+        const pos = bot.entity.position;
+        if (lastPos && pos.distanceTo(lastPos) < 0.1) {
+          stuckCount++;
+          if (stuckCount > 3) {
+            bot.setControlState('jump', true);
+            bot.setControlState('forward', true);
+            
+            const blockInFront = bot.blockAtCursor(3);
+            if (blockInFront && bot.canDigBlock(blockInFront)) {
+              bot.dig(blockInFront);
+            }
+            
+            if (stuckCount > 10) {
+              bot.pathfinder.setGoal(null);
+              stuckCount = 0;
+              setTimeout(() => {
+                bot.setControlState('forward', false);
+                bot.setControlState('jump', false);
+              }, 500);
+            }
+          }
+        } else {
+          stuckCount = 0;
+          bot.setControlState('forward', false);
+        }
+        lastPos = pos.clone();
+      }, 200);
+
+      // IMPROVED FOLLOW SYSTEM
       setInterval(() => {
         if (followTarget && bot.players[followTarget]?.entity) {
           const target = bot.players[followTarget].entity;
@@ -221,15 +345,6 @@ function createBot() {
         }
       }, 100);
 
-      // AUTO-JUMP: Always keep jump control active when moving
-      setInterval(() => {
-        if (bot.pathfinder.isMoving() && !attachTarget && !followTarget) {
-          bot.setControlState('jump', true);
-        } else if (!followTarget && !spinAttackMode) {
-          bot.setControlState('jump', false);
-        }
-      }, 50);
-
       // Ground Item Collection Loop
       setInterval(() => {
         if (!collectItemsMode) return;
@@ -249,7 +364,7 @@ function createBot() {
         }
       }, 500);
 
-      // Smooth Riding Loop - Fixed for attacking
+      // Smooth Riding Loop
       setInterval(() => {
         if (attachTarget) {
           let e = (attachType === 'player') ? bot.players[attachTarget]?.entity : bot.entities[attachTarget];
@@ -272,7 +387,7 @@ function createBot() {
         }
       }, 1000);
 
-      // Attack Mode Loop - Now supports attacking attached players
+      // Attack Mode Loop
       setInterval(() => {
         const targetName = attackTarget || (attachType === 'player' ? attachTarget : null);
         if (!targetName) return;
@@ -306,26 +421,6 @@ function createBot() {
         const dz = (Math.random() * 2 - 1) * radius;
         bot.pathfinder.setGoal(new goals.GoalNear(origin.x + dx, origin.y, origin.z + dz, 1));
       }, 8000);
-
-      // Stuck Detector
-      let lastPos = null;
-      setInterval(() => {
-        const hasGoal = bot.pathfinder.goal !== null && bot.pathfinder.goal !== undefined;
-        if (!hasGoal) { lastPos = null; return; }
-
-        const pos = bot.entity.position;
-        if (lastPos && pos.distanceTo(lastPos) < 0.15) {
-          bot.setControlState('forward', true);
-          bot.setControlState('jump', true);
-          const blockInFront = bot.blockAtCursor(3);
-          if (blockInFront && bot.canDigBlock(blockInFront)) {
-            bot.dig(blockInFront);
-          }
-        } else {
-          bot.setControlState('forward', false);
-        }
-        lastPos = pos.clone();
-      }, 100);
     });
 
     bot.on('kicked', (reason) => {
@@ -357,6 +452,9 @@ function createBot() {
       botStats.botUptime = 0;
       followTarget = null;
       spinAttackMode = false;
+      patrolMode = false;
+      guardTarget = null;
+      autoFishMode = false;
       setTimeout(createBot, 15000);
     });
 
@@ -371,33 +469,58 @@ function createBot() {
       addMinecraftLog('CHAT', message);
     });
 
-    function equipArmor() {
-      const armorSlots = {
-        'helmet': 'head',
-        'chestplate': 'torso',
-        'leggings': 'legs',
-        'boots': 'feet'
-      };
+    function equipAllArmor() {
+      const armorTypes = [
+        { type: 'helmet', slot: 'head' },
+        { type: 'chestplate', slot: 'torso' },
+        { type: 'leggings', slot: 'legs' },
+        { type: 'boots', slot: 'feet' }
+      ];
       
       const items = bot.inventory.items();
       let equippedCount = 0;
       
-      for (const [armorType, slot] of Object.entries(armorSlots)) {
-        const armor = items.find(i => i.name.includes(armorType));
+      for (const armorType of armorTypes) {
+        const armor = items.find(i => i.name.includes(armorType.type));
         if (armor) {
           try {
-            bot.equip(armor, slot);
+            bot.equip(armor, armorType.slot);
             equippedCount++;
-            addBotLog('INFO', `Equipped ${armor.name} to ${slot}`);
+            addBotLog('INFO', `Equipped ${armor.name} to ${armorType.slot}`);
           } catch (e) {
             addBotLog('ERROR', `Failed to equip ${armor.name}: ${e.message}`);
           }
         }
       }
       
-      if (equippedCount > 0) {
-        addBotLog('INFO', `Equipped ${equippedCount} armor pieces`);
+      return equippedCount > 0;
+    }
+
+    function equipSingleArmor(armorType) {
+      const slotMap = {
+        'helmet': 'head',
+        'chestplate': 'torso',
+        'leggings': 'legs',
+        'boots': 'feet'
+      };
+      
+      const slot = slotMap[armorType];
+      if (!slot) return false;
+      
+      const items = bot.inventory.items();
+      const armor = items.find(i => i.name.includes(armorType));
+      
+      if (armor) {
+        try {
+          bot.equip(armor, slot);
+          addBotLog('INFO', `Equipped ${armor.name} to ${slot}`);
+          return true;
+        } catch (e) {
+          addBotLog('ERROR', `Failed to equip ${armor.name}: ${e.message}`);
+          return false;
+        }
       }
+      return false;
     }
 
     function findPlayerOrArg(username, args) {
@@ -420,7 +543,7 @@ function createBot() {
       
       addBotLog('COMMAND', `${username} executed: ${message}`);
 
-      if (command === '!cmdlist') {
+      if (command === '!cmdlist' || command === '!help' || command === '!commands') {
         const commands = [
           "=== CLOUDAFK BOT COMMANDS ===",
           "Info:",
@@ -448,6 +571,11 @@ function createBot() {
           "!flee - Runs from hostiles",
           "!jump - Makes bot jump",
           "!stop - Stops all actions",
+          "!patrol - Patrols between points",
+          "!patrol add x y z - Add patrol point",
+          "!patrol start - Start patrolling",
+          "!patrol stop - Stop patrolling",
+          "!patrol clear - Clear patrol points",
           "",
           "Combat:",
           "!attack [p] - Hunts and attacks player",
@@ -457,9 +585,15 @@ function createBot() {
           "!click - Attacks nearest entity",
           "!spinattack - Spins and attacks nearby enemies",
           "!spinattack stop - Stops spin attack",
+          "!guard [p] - Guards specified player",
+          "!guard stop - Stops guarding",
           "",
           "Armor:",
-          "!armor - Equips best armor from inventory",
+          "!armor - Equips all armor from inventory",
+          "!armor helmet - Equips only helmet",
+          "!armor chestplate - Equips only chestplate",
+          "!armor leggings - Equips only leggings",
+          "!armor boots - Equips only boots",
           "!armor stop - Removes all armor",
           "",
           "Actions:",
@@ -469,6 +603,9 @@ function createBot() {
           "!activate - Activates block/entity",
           "!lookat [p] - Looks at player",
           "!sleeptest - Tries to sleep",
+          "!eat - Bot eats food",
+          "!fish - Bot starts fishing",
+          "!fish stop - Stops fishing",
           "",
           "Building:",
           "!place [item] - Places item",
@@ -515,9 +652,94 @@ function createBot() {
         return; 
       }
 
-      if (command === '!armor') {
+      // Patrol commands
+      if (command === '!patrol') {
+        const action = args[1]?.toLowerCase();
+        
+        if (action === 'add') {
+          const x = parseFloat(args[2]), y = parseFloat(args[3]), z = parseFloat(args[4]);
+          if ([x, y, z].some(isNaN)) return bot.whisper(username, "Use: !patrol add [x] [y] [z]");
+          if (!patrolPoints) patrolPoints = [];
+          patrolPoints.push({ x, y, z });
+          bot.whisper(username, `Added patrol point at ${x}, ${y}, ${z}`);
+          return;
+        }
+        
+        if (action === 'start') {
+          if (!patrolPoints || patrolPoints.length === 0) return bot.whisper(username, "No patrol points set. Use !patrol add first.");
+          patrolMode = true;
+          followTarget = null;
+          bot.whisper(username, `Started patrolling with ${patrolPoints.length} points!`);
+          return;
+        }
+        
+        if (action === 'stop') {
+          patrolMode = false;
+          bot.pathfinder.setGoal(null);
+          bot.whisper(username, "Stopped patrolling.");
+          return;
+        }
+        
+        if (action === 'clear') {
+          patrolPoints = [];
+          patrolMode = false;
+          bot.pathfinder.setGoal(null);
+          bot.whisper(username, "Cleared patrol points.");
+          return;
+        }
+        
+        bot.whisper(username, "Patrol commands: add, start, stop, clear");
+        return;
+      }
+
+      // Guard command
+      if (command === '!guard') {
+        const targetName = args[1];
+        if (!targetName || targetName === 'stop') {
+          guardTarget = null;
+          bot.pathfinder.setGoal(null);
+          bot.whisper(username, "Stopped guarding.");
+          return;
+        }
+        
+        if (!bot.players[targetName]) return bot.whisper(username, `Player ${targetName} not found.`);
+        
+        guardTarget = targetName;
+        followTarget = null;
+        bot.whisper(username, `Guarding ${targetName}! Bot will protect them from hostiles.`);
+        return;
+      }
+
+      // Fish command
+      if (command === '!fish') {
         if (args[1] === 'stop') {
-          // Remove all armor
+          autoFishMode = false;
+          bot.whisper(username, "Stopped fishing.");
+          return;
+        }
+        
+        autoFishMode = true;
+        bot.whisper(username, "Fishing mode activated! Bot will fish automatically.");
+        return;
+      }
+
+      // Eat command
+      if (command === '!eat') {
+        const food = bot.inventory.items().find(i => i.name.includes('apple') || i.name.includes('beef') || i.name.includes('porkchop') || i.name.includes('chicken') || i.name.includes('bread') || i.name.includes('carrot') || i.name.includes('potato') || i.name.includes('fish'));
+        if (!food) return bot.whisper(username, "No food found in inventory.");
+        
+        bot.equip(food, 'hand').then(() => {
+          bot.consume();
+          bot.whisper(username, `Eating ${food.name}!`);
+        }).catch(e => bot.whisper(username, `Failed to eat: ${e.message}`));
+        return;
+      }
+
+      // Armor command
+      if (command === '!armor') {
+        const armorType = args[1]?.toLowerCase();
+        
+        if (armorType === 'stop') {
           const armorSlots = ['head', 'torso', 'legs', 'feet'];
           armorSlots.forEach(slot => {
             const armor = bot.inventory.slots[bot.getEquipmentDestSlot(slot)];
@@ -529,8 +751,14 @@ function createBot() {
           return;
         }
         
-        equipArmor();
-        bot.whisper(username, "Attempting to equip armor from inventory!");
+        if (armorType && ['helmet', 'chestplate', 'leggings', 'boots'].includes(armorType)) {
+          const success = equipSingleArmor(armorType);
+          bot.whisper(username, success ? `Equipped ${armorType}!` : `No ${armorType} found in inventory.`);
+          return;
+        }
+        
+        const success = equipAllArmor();
+        bot.whisper(username, success ? "Equipped all armor from inventory!" : "No armor found in inventory.");
         return;
       }
 
@@ -550,6 +778,8 @@ function createBot() {
         wanderMode = false;
         followTarget = null;
         collectItemsMode = false;
+        patrolMode = false;
+        guardTarget = null;
         bot.whisper(username, "Spin attack mode activated! Bot will spin and attack nearby enemies!");
         return;
       }
@@ -560,6 +790,7 @@ function createBot() {
         attachTarget = null; attachType = null;
         protectMode = false; attackTarget = null; wanderMode = false;
         collectItemsMode = false; followTarget = null; spinAttackMode = false;
+        patrolMode = false; guardTarget = null; autoFishMode = false;
         bot.whisper(username, "Cleared actions.");
         return;
       }
@@ -567,6 +798,7 @@ function createBot() {
       if (command === '!come') {
         attachTarget = null; attachType = null;
         attackTarget = null; collectItemsMode = false; followTarget = null; spinAttackMode = false;
+        patrolMode = false; guardTarget = null;
         const target = bot.players[username]?.entity;
         if (!target) return bot.whisper(username, "Can't see you.");
         const p = target.position;
@@ -593,6 +825,8 @@ function createBot() {
         collectItemsMode = false;
         wanderMode = false;
         spinAttackMode = false;
+        patrolMode = false;
+        guardTarget = null;
         
         followTarget = targetName;
         
@@ -608,6 +842,7 @@ function createBot() {
         if ([x, y, z].some(isNaN)) return bot.whisper(username, "Use: !goto [x] [y] [z]");
         attachTarget = null; attachType = null;
         attackTarget = null; collectItemsMode = false; followTarget = null; spinAttackMode = false;
+        patrolMode = false; guardTarget = null;
         bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1));
         bot.whisper(username, `Heading to ${x}, ${y}, ${z}`);
         return;
@@ -618,6 +853,7 @@ function createBot() {
         const radius = parseInt(args[1]) || 10;
         wanderMode = { radius, origin: bot.entity.position.clone() };
         collectItemsMode = false; followTarget = null; spinAttackMode = false;
+        patrolMode = false; guardTarget = null;
         bot.whisper(username, `Wandering within ${radius} blocks.`);
         return;
       }
@@ -625,7 +861,7 @@ function createBot() {
       if (command === '!flee') {
         const hostile = bot.nearestEntity(e => e.type === 'hostile' || e.type === 'monster');
         if (!hostile) return bot.whisper(username, "No hostiles nearby.");
-        followTarget = null; spinAttackMode = false;
+        followTarget = null; spinAttackMode = false; patrolMode = false; guardTarget = null;
         const away = bot.entity.position.minus(hostile.position).normalize().scale(15).plus(bot.entity.position);
         bot.pathfinder.setGoal(new goals.GoalNear(away.x, away.y, away.z, 1));
         bot.whisper(username, `Fleeing from ${hostile.name || 'mob'}!`);
@@ -643,6 +879,7 @@ function createBot() {
         if (!bot.players[pTarget]) return bot.whisper(username, "Player offline.");
         attackTarget = pTarget;
         collectItemsMode = false; followTarget = null; spinAttackMode = false;
+        patrolMode = false; guardTarget = null;
         bot.whisper(username, `Attacking ${pTarget}!`);
         return;
       }
@@ -651,6 +888,7 @@ function createBot() {
         if (args[1] === 'stop') { protectMode = false; bot.pathfinder.setGoal(null); bot.whisper(username, "Protect mode off."); return; }
         protectMode = true;
         collectItemsMode = false; followTarget = null; spinAttackMode = false;
+        patrolMode = false; guardTarget = null;
         bot.whisper(username, "Protect mode on - attacking nearby hostiles.");
         return;
       }
@@ -716,6 +954,8 @@ function createBot() {
           attackTarget = null;
           followTarget = null;
           spinAttackMode = false;
+          patrolMode = false;
+          guardTarget = null;
           bot.pathfinder.setGoal(null);
           bot.whisper(username, "Detached and stopped attacking."); 
           return; 
@@ -736,6 +976,8 @@ function createBot() {
         collectItemsMode = false;
         followTarget = null;
         spinAttackMode = false;
+        patrolMode = false;
+        guardTarget = null;
         bot.pathfinder.setGoal(null); 
         bot.whisper(username, `Attached to ${pTarget} and attacking!`); 
         return;
@@ -764,6 +1006,8 @@ function createBot() {
         collectItemsMode = false;
         followTarget = null;
         spinAttackMode = false;
+        patrolMode = false;
+        guardTarget = null;
         bot.pathfinder.setGoal(null);
         bot.whisper(username, `Attached to nearest mob (${closest.name || closest.displayName || 'unknown'})`);
         return;
@@ -798,6 +1042,8 @@ function createBot() {
         wanderMode = false;
         followTarget = null;
         spinAttackMode = false;
+        patrolMode = false;
+        guardTarget = null;
         bot.whisper(username, "Collecting ground items! Bot will pick up any items on the ground.");
         return;
       }
