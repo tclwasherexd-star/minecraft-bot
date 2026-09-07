@@ -1,5 +1,7 @@
-const mineflayer = require('mineflayer'), express = require('express');
-const { pathfinder, Movements, goals } = require('mineflayer-pathfinder'), app = express();
+const mineflayer = require('mineflayer');
+const express = require('express');
+const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+const app = express();
 
 const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
@@ -9,12 +11,15 @@ const useAuthPlugin = true, accountPassword = 'YourBotPassword123';
 let bot, customCommands = {}, defaultMove = null, attachTarget = null, attachType = null;
 
 function createBot() {
-  bot = mineflayer.createBot(config); bot.loadPlugin(pathfinder);
+  bot = mineflayer.createBot(config); 
+  bot.loadPlugin(pathfinder);
 
   bot.on('spawn', () => {
     console.log(`${bot.username} joined!`);
     const mcData = require('minecraft-data')(bot.version);
-    defaultMove = new Movements(bot, mcData); defaultMove.canDig = false; defaultMove.allow1by1towers = false;
+    defaultMove = new Movements(bot, mcData); 
+    defaultMove.canDig = false; 
+    defaultMove.allow1by1towers = false;
     bot.pathfinder.setMovements(defaultMove);
 
     if (useAuthPlugin) {
@@ -39,7 +44,9 @@ function createBot() {
     console.log(`[MSG] ${username}: ${message}`);
     if (username.toLowerCase() !== myUsername.toLowerCase()) { bot.whisper(username, "Access denied."); return; }
 
-    const msg = message.trim(), args = msg.split(' '), command = args[0].toLowerCase();
+    const msg = message.trim();
+    const args = msg.split(' ');
+    const command = args[0].toLowerCase(); // ✅ FIXED: Only targets the single word command!
 
     if (command === '!cmds') { bot.whisper(username, "List: !help, !coords, !status, !info, !inventory, !players, !time, !weather, !jump, !stop, !come, !follow, !protect, !lookat, !talk, !shout, !click, !sneak, !activate, !sleeptest, !drop, !dropall, !hand, !equip, !attachplayer, !attachmob, !addcmd, !delcmd, !listcmds, !clean"); return; }
     if (command === '!help') { bot.whisper(username, "Modules: !help1(Info), !help2(Move), !help3(Act), !help4(Inv), !help5(Sandbox)"); return; }
