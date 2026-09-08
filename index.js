@@ -3,7 +3,7 @@ const express = require('express');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const app = express();
 
-const config = { host: 'nbtplace.play.hosting', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
+const config = { host: 'nbttesssa.tkmc.net', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
 const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5']; // Add up to 5 friends
 const useAuthPlugin = false;
