@@ -3,9 +3,9 @@ const express = require('express');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const app = express();
 
-const config = { host: 'nbttesssa.tkmc.net', port: 25565, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
+const config = { host: 'node-sg-free-01.tickhosting.com', port: 50838, username: 'CloudAFK_Bot', version: '1.20.1', auth: 'offline' };
 
-const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5']; // Add up to 5 friends
+const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'];
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 let bot, defaultMove = null, attachTarget = null, attachType = null, protectMode = false, attackTarget = null, wanderMode = false, spawnTime = null, freezeMode = false, textSpamInterval = null, autoBreakBlock = null, huntTarget = null, spamPrivateInterval = null, attackMobs = false, followTarget = null, mineBlock = null;
@@ -65,7 +65,7 @@ function createBot() {
         }
       }, 300);
 
-      // Attack mobs loop - clicks/hits nearby entities
+      // Attack mobs loop
       setInterval(() => {
         if (attackMobs && !freezeMode) {
           const target = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'monster' || e.type === 'hostile' || e.type === 'player') && e !== bot.entity);
@@ -352,7 +352,6 @@ function createBot() {
       }
       
       if (command === '!unsneak') { bot.setControlState('sneak', false); safeWhisper(username, "Standing up"); return; }
-      
       if (command === '!sneak') { bot.setControlState('sneak', true); return; }
       
       if (command === '!lookatfollow') {
@@ -544,6 +543,11 @@ function createBot() {
         if (args[1] === 'stop') { autoBreakBlock = null; } else { autoBreakBlock = args.slice(1).join('_'); }
         return;
       }
+      if (command === '!info') { safeWhisper(username, `Biome:${bot.blockAt(bot.entity.position)?.biome.name} Ping:${bot.player.ping}ms`); return; }
+      if (command === '!time') { safeWhisper(username, `Time: ${bot.time.timeOfDay}`); return; }
+      if (command === '!weather') { safeWhisper(username, bot.isRaining ? "Raining" : "Clear"); return; }
+      if (command === '!inventory') { const items = bot.inventory.items().map(i => `${i.name}x${i.count}`).join(', '); safeWhisper(username, items || "Empty"); return; }
+      if (command === '!sleeptest') { const bed = bot.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 16 }); if (bed) bot.sleep(bed).catch(() => {}); return; }
       
     } catch (e) {
       safeWhisper(username, "Command is not working or is broken");
