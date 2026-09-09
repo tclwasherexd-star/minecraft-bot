@@ -74,7 +74,8 @@ const COMMAND_REFERENCE = [
     '!players [bot|all] — who\'s online',
     '!exp [bot|all] — bot\'s XP level',
     '!gamemode [bot|all] — bot\'s gamemode',
-    '!uptime [bot|all] — time since last join'
+    '!uptime [bot|all] — time since last join',
+    '!inventory [bot|all] — show bot\'s inventory'
   ]},
   { group: 'Movement (walking)', lines: [
     '!come [bot|all] — bot walks to you',
@@ -93,11 +94,11 @@ const COMMAND_REFERENCE = [
     '!echo [bot|all] <message> — bot whispers it back to you'
   ]},
   { group: 'Spam', lines: [
-    '!link <url> [bot|all] — spam the URL in chat (no delay)',
-    '!spamtext <text> [bot|all] — spam text in chat (no delay)',
-    '!msgspam <player> <text> [bot|all] — spam whispers to a player (no delay)',
-    '!stoplink [bot|all] — stop spamming the link (or any spam)',
-    '!stop [bot|all] — also stops spam'
+    '!link <url> [bot|all] — spam URL in chat (no delay)',
+    '!spamtext <message> [bot|all] — spam text in chat (no delay)',
+    '!msgspam <player> <message> [bot|all] — spam whisper to player (no delay)',
+    '!stoplink [bot|all] — stop link spam',
+    '!stopspam [bot|all] — stop all spam'
   ]},
   { group: 'Server / self', lines: [
     '!killbot [bot|all] — bot runs /kill on itself',
@@ -153,28 +154,14 @@ function handleCommand(username, message) {
   let botArg = null;
 
   // Commands where bot target can appear as second argument (before other args)
-  // For spamtext and msgspam, the bot target is at the end, so they are not in this list.
-  const textCommands = ['!talk', '!shout', '!msg', '!echo', '!dig', '!link', '!spamtext', '!msgspam'];
+  const textCommands = ['!talk', '!shout', '!msg', '!echo', '!dig', '!link'];
 
   if (textCommands.includes(command)) {
-    // For these commands, the bot target can be either the second argument OR the last argument.
-    // But for !link, !spamtext, !msgspam we expect the target at the end.
-    // To simplify, we'll handle them separately below.
-    if (command === '!link' || command === '!spamtext' || command === '!msgspam') {
-      // Target is expected as last argument
-      const lastArg = args[args.length - 1];
-      const allBotNames = ['all', ...botNames.map(n => n.toLowerCase())];
-      if (lastArg && allBotNames.includes(lastArg.toLowerCase())) {
-        botArg = lastArg;
-        args.pop();
-      }
-    } else {
-      const possibleBotArg = args[1];
-      const allBotNames = ['all', ...botNames.map(n => n.toLowerCase())];
-      if (possibleBotArg && allBotNames.includes(possibleBotArg.toLowerCase())) {
-        botArg = possibleBotArg;
-        args.splice(1, 1);
-      }
+    const possibleBotArg = args[1];
+    const allBotNames = ['all', ...botNames.map(n => n.toLowerCase())];
+    if (possibleBotArg && allBotNames.includes(possibleBotArg.toLowerCase())) {
+      botArg = possibleBotArg;
+      args.splice(1, 1);
     }
   } else {
     const lastArg = args[args.length - 1];
@@ -219,6 +206,16 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!exp') { safeWhisper(botInstance, username, `XP: ${botInstance.experience.level}`); return; }
     if (command === '!gamemode') { safeWhisper(botInstance, username, `Gamemode: ${botInstance.game.gameMode}`); return; }
     if (command === '!uptime') { safeWhisper(botInstance, username, `Uptime: ${fmtTime(Date.now() - botJoinTime[botName])}`); return; }
+    if (command === '!inventory') {
+      const items = botInstance.inventory.items();
+      if (items.length === 0) {
+        safeWhisper(botInstance, username, `${botName} has empty inventory.`);
+      } else {
+        const itemList = items.map(i => `${i.name} x${i.count}`).join(', ');
+        safeWhisper(botInstance, username, `${botName} inventory: ${itemList}`);
+      }
+      return;
+    }
 
     // !tpbring - server-side /tp (bot to you)
     if (command === '!tpbring') {
@@ -292,53 +289,100 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!msg') { if (args[1] && args[2]) safeWhisper(botInstance, args[1], args.slice(2).join(' ')); return; }
     if (command === '!echo') { safeWhisper(botInstance, username, args.slice(1).join(' ')); return; }
 
-    // Spam commands
+    // !link - spam URL
     if (command === '!link') {
       const url = args[1];
       if (!url) {
-        safeWhisper(botInstance, username, 'Please provide a URL: !link <url> [bot]');
+        safeWhisper(botInstance, username, 'Please provide a URL: !link <url>');
         return;
       }
-      startSpam(botInstance, 'link', url, username);
+      if (botInstance.spamLinkInterval) clearInterval(botInstance.spamLinkInterval);
+      botInstance.spamLinkInterval = setInterval(() => {
+        if (!botInstance.entity) {
+          clearInterval(botInstance.spamLinkInterval);
+          botInstance.spamLinkInterval = null;
+          return;
+        }
+        botInstance.chat(url);
+      }, 0);
+      safeWhisper(botInstance, username, `${botName} is now spamming: ${url}`);
       return;
     }
 
+    // !spamtext - spam text message
     if (command === '!spamtext') {
       const text = args.slice(1).join(' ');
       if (!text) {
-        safeWhisper(botInstance, username, 'Please provide text: !spamtext <text> [bot]');
+        safeWhisper(botInstance, username, 'Please provide text: !spamtext <message>');
         return;
       }
-      startSpam(botInstance, 'text', text, username);
+      if (botInstance.spamTextInterval) clearInterval(botInstance.spamTextInterval);
+      botInstance.spamTextInterval = setInterval(() => {
+        if (!botInstance.entity) {
+          clearInterval(botInstance.spamTextInterval);
+          botInstance.spamTextInterval = null;
+          return;
+        }
+        botInstance.chat(text);
+      }, 0);
+      safeWhisper(botInstance, username, `${botName} is now spamming text: ${text}`);
       return;
     }
 
+    // !msgspam - spam whisper to a player
     if (command === '!msgspam') {
       const targetPlayer = args[1];
-      const text = args.slice(2).join(' ');
-      if (!targetPlayer || !text) {
-        safeWhisper(botInstance, username, 'Usage: !msgspam <player> <text> [bot]');
+      const msg = args.slice(2).join(' ');
+      if (!targetPlayer || !msg) {
+        safeWhisper(botInstance, username, 'Usage: !msgspam <player> <message>');
         return;
       }
-      startSpam(botInstance, 'msg', { target: targetPlayer, text: text }, username);
+      if (botInstance.spamMsgInterval) clearInterval(botInstance.spamMsgInterval);
+      botInstance.spamMsgInterval = setInterval(() => {
+        if (!botInstance.entity) {
+          clearInterval(botInstance.spamMsgInterval);
+          botInstance.spamMsgInterval = null;
+          return;
+        }
+        safeWhisper(botInstance, targetPlayer, msg);
+      }, 0);
+      safeWhisper(botInstance, username, `${botName} is now spamming ${targetPlayer}: ${msg}`);
       return;
     }
 
-    // !stoplink - stop spam
+    // !stoplink - stop link spam only
     if (command === '!stoplink') {
-      stopSpam(botInstance, username);
+      if (botInstance.spamLinkInterval) {
+        clearInterval(botInstance.spamLinkInterval);
+        botInstance.spamLinkInterval = null;
+        safeWhisper(botInstance, username, `${botName} stopped link spam.`);
+      } else {
+        safeWhisper(botInstance, username, `${botName} is not spamming links.`);
+      }
+      return;
+    }
+
+    // !stopspam - stop all spam
+    if (command === '!stopspam') {
+      let stoppedAny = false;
+      if (botInstance.spamLinkInterval) { clearInterval(botInstance.spamLinkInterval); botInstance.spamLinkInterval = null; stoppedAny = true; }
+      if (botInstance.spamTextInterval) { clearInterval(botInstance.spamTextInterval); botInstance.spamTextInterval = null; stoppedAny = true; }
+      if (botInstance.spamMsgInterval) { clearInterval(botInstance.spamMsgInterval); botInstance.spamMsgInterval = null; stoppedAny = true; }
+      safeWhisper(botInstance, username, stoppedAny ? `${botName} stopped all spam.` : `${botName} is not spamming.`);
       return;
     }
 
     if (command === '!stop') {
       clearMovement(botInstance);
-      stopSpam(botInstance, username);
+      // Stop all spam
+      if (botInstance.spamLinkInterval) { clearInterval(botInstance.spamLinkInterval); botInstance.spamLinkInterval = null; }
+      if (botInstance.spamTextInterval) { clearInterval(botInstance.spamTextInterval); botInstance.spamTextInterval = null; }
+      if (botInstance.spamMsgInterval) { clearInterval(botInstance.spamMsgInterval); botInstance.spamMsgInterval = null; }
       botInstance.pathfinder.setGoal(null);
       botInstance.clearControlStates();
       safeWhisper(botInstance, username, `${botName} stopped!`);
       return;
     }
-
     if (command === '!jump') {
       if (botInstance.pathfinder.isMoving()) {
         safeWhisper(botInstance, username, `${botName} is walking, can't jump on command right now.`);
@@ -449,48 +493,6 @@ function executeCommand(botInstance, username, args, command) {
   } catch (e) {}
 }
 
-// Helper functions for spam
-function startSpam(bot, type, data, username) {
-  // Stop any existing spam
-  stopSpam(bot, username, false);
-  bot.spamType = type;
-  bot.spamData = data;
-  bot.spamInterval = setInterval(() => {
-    if (!bot.entity) {
-      stopSpam(bot, username, false);
-      return;
-    }
-    try {
-      if (type === 'link') {
-        bot.chat(data);
-      } else if (type === 'text') {
-        bot.chat(data);
-      } else if (type === 'msg') {
-        bot.whisper(data.target, data.text);
-      }
-    } catch (e) {
-      // ignore
-    }
-  }, 0); // 0ms delay, Node will throttle as fast as possible
-  if (type === 'link') safeWhisper(bot, username, `${bot.username} is now spamming URL: ${data}`);
-  else if (type === 'text') safeWhisper(bot, username, `${bot.username} is now spamming: ${data}`);
-  else if (type === 'msg') safeWhisper(bot, username, `${bot.username} is now spamming whispers to ${data.target}: ${data.text}`);
-}
-
-function stopSpam(bot, username, notify = true) {
-  if (bot.spamInterval) {
-    clearInterval(bot.spamInterval);
-    bot.spamInterval = null;
-    bot.spamType = null;
-    bot.spamData = null;
-    if (notify && username) {
-      safeWhisper(bot, username, `${bot.username} stopped spamming.`);
-    }
-  } else if (notify && username) {
-    safeWhisper(bot, username, `${bot.username} is not spamming.`);
-  }
-}
-
 function clearMovement(bot) {
   bot.followTarget = null;
   bot.comingTo = null;
@@ -550,9 +552,10 @@ function createBot(botUsername) {
       bot.comingTo = null;
       bot.mineBlock = null;
       bot._activeGoalKey = null;
-      bot.spamInterval = null; // for spam commands
-      bot.spamType = null;
-      bot.spamData = null;
+      // Initialize spam intervals
+      bot.spamLinkInterval = null;
+      bot.spamTextInterval = null;
+      bot.spamMsgInterval = null;
       let stuckTicks = 0;
 
       bot.followInterval = setInterval(() => {
@@ -634,29 +637,44 @@ function createBot(botUsername) {
         }
       }, 500);
 
+      // Improved mine loop: bots pick random blocks from a wider selection,
+      // so they don't all target the same block.
       bot.mineInterval = setInterval(() => {
-        if (bot.mineBlock && bot.entity && !bot.followTarget && !bot.comingTo) {
-          const blocks = bot.findBlocks({ matching: b => b.name.includes(bot.mineBlock), count: 1 });
-          if (blocks.length > 0) {
-            const blockPos = blocks[0];
-            const block = bot.blockAt(blockPos);
-            if (!block) return;
-            const distance = bot.entity.position.distanceTo(blockPos);
-            const goalKey = `mine:${bot.mineBlock}:${blockPos}`;
+        if (!bot.mineBlock || !bot.entity || bot.followTarget || bot.comingTo) return;
 
-            if (distance > 4) {
-              if (bot._activeGoalKey !== goalKey) {
-                bot.pathfinder.setGoal(new goals.GoalNear(blockPos.x, blockPos.y, blockPos.z, 2), true);
-                bot._activeGoalKey = goalKey;
-              }
-            } else {
-              if (bot._activeGoalKey?.startsWith('mine:')) {
-                bot.pathfinder.setGoal(null);
-                bot._activeGoalKey = null;
-              }
-              if (bot.canDigBlock(block)) bot.dig(block).catch(() => {});
-            }
+        const activeGoal = bot._activeGoalKey;
+        if (activeGoal?.startsWith('mine:')) {
+          // Parse target coordinates from goal key: "mine:blockType:x,y,z"
+          const parts = activeGoal.split(':');
+          const posStr = parts[2];
+          const [x, y, z] = posStr.split(',').map(Number);
+          const block = bot.blockAt(new mineflayer.Vec3(x, y, z));
+          if (!block || !block.name.includes(bot.mineBlock)) {
+            // Target block is gone or no longer matches; clear and find new
+            bot.pathfinder.setGoal(null);
+            bot._activeGoalKey = null;
+            return;
           }
+          const distance = bot.entity.position.distanceTo(block.position);
+          if (distance <= 4) {
+            // Close enough, dig
+            bot.pathfinder.setGoal(null);
+            bot._activeGoalKey = null;
+            if (bot.canDigBlock(block)) bot.dig(block).catch(() => {});
+          }
+          // Otherwise, pathfinder is already moving; do nothing
+          return;
+        }
+
+        // No active mine goal; search for blocks and pick randomly
+        const blocks = bot.findBlocks({ matching: b => b.name.includes(bot.mineBlock), count: 10 });
+        if (blocks.length > 0) {
+          const blockPos = blocks[Math.floor(Math.random() * blocks.length)];
+          const block = bot.blockAt(blockPos);
+          if (!block) return;
+          const goalKey = `mine:${bot.mineBlock}:${blockPos.x},${blockPos.y},${blockPos.z}`;
+          bot.pathfinder.setGoal(new goals.GoalNear(blockPos.x, blockPos.y, blockPos.z, 2), true);
+          bot._activeGoalKey = goalKey;
         }
       }, 500);
     });
@@ -713,7 +731,10 @@ function cleanupBot(bot) {
   clearInterval(bot.followInterval);
   clearInterval(bot.comeInterval);
   clearInterval(bot.mineInterval);
-  clearInterval(bot.spamInterval); // clear spam on disconnect
+  // Clear all spam intervals
+  clearInterval(bot.spamLinkInterval);
+  clearInterval(bot.spamTextInterval);
+  clearInterval(bot.spamMsgInterval);
 }
 
 // API endpoint for website auto-update
@@ -824,7 +845,7 @@ app.get('/', (req, res) => {
         }
 
         updateStatus();
-        setInterval(updateStatus, 10000);
+        setInterval(updateStatus, 3000);
       </script>
     </body>
     </html>
