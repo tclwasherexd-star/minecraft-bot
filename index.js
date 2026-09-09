@@ -3,14 +3,20 @@ const express = require('express');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const app = express();
 
-const config = { host: 'node-sg-free-01.tickhosting.com', port: 50838, version: '1.20.1', auth: 'offline' };
+const config = { 
+  host: 'node-sg-free-01.tickhosting.com', 
+  port: 50838, 
+  version: '1.20.1', 
+  auth: 'offline',
+  checkTimeoutInterval: 60000,
+  reconnectDelay: 3000
+};
 
 const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'];
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 
-// Number of bots to create
-const NUMBER_OF_BOTS = 10;
+const NUMBER_OF_BOTS = 5; // 5 bots
 
 let bots = {};
 let consoleLogs = [];
@@ -39,8 +45,7 @@ function createNextBot() {
   
   createBot(botUsername);
   
-  // Create next bot after 3 seconds
-  setTimeout(createNextBot, 3000);
+  setTimeout(createNextBot, 5000);
 }
 
 function createBot(botUsername) {
@@ -53,6 +58,12 @@ function createBot(botUsername) {
     bots[botUsername] = bot;
     botStatus[botUsername] = 'connecting';
     addConsoleLog(`${botUsername} connecting...`);
+
+    const keepAliveInterval = setInterval(() => {
+      if (bot && botStatus[botUsername] === 'online') {
+        bot.chat('/ping');
+      }
+    }, 30000);
 
     bot.on('spawn', () => {
       botStatus[botUsername] = 'online';
@@ -74,7 +85,7 @@ function createBot(botUsername) {
       
       bot.pathfinder.setMovements(defaultMove);
       bot.pathfinder.enablePathShortcuts = true;
-      bot.pathfinder.thinkTimeout = 20;
+      bot.pathfinder.thinkTimeout = 50;
 
       bot.followTarget = null;
       bot.attackTarget = null;
@@ -90,68 +101,15 @@ function createBot(botUsername) {
       bot.textSpamInterval = null;
       bot.spamPrivateInterval = null;
 
-      // Auto-mine loop
-      setInterval(() => {
-        if (bot.mineBlock && !bot.freezeMode) {
-          const blocks = bot.findBlocks({
-            matching: b => b.name && b.name.toLowerCase().includes(bot.mineBlock.toLowerCase()),
-            maxDistance: 16,
-            count: 1
-          });
-          if (blocks.length > 0) {
-            const block = bot.blockAt(blocks[0]);
-            if (block && bot.canDigBlock(block)) {
-              bot.dig(block).catch(() => {});
-            }
-          }
-        }
-      }, 200);
-
-      // Attack mobs loop
-      setInterval(() => {
-        if (bot.attackMobs && !bot.freezeMode) {
-          const target = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'monster' || e.type === 'hostile') && e !== bot.entity);
-          if (target && bot.entity.position.distanceTo(target.position) < 8) {
-            bot.lookAt(target.position.offset(0, target.height, 0));
-            bot.attack(target);
-          }
-        }
-      }, 300);
-
-      // Follow loop
       setInterval(() => {
         if (bot.followTarget && !bot.freezeMode) {
           const target = bot.players[bot.followTarget]?.entity;
           if (target) {
-            const distance = bot.entity.position.distanceTo(target.position);
-            const heightDiff = target.position.y - bot.entity.position.y;
-            
-            if (distance > 3) {
-              bot.setControlState('sprint', true);
-              bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
-              
-              if (heightDiff > 2 && !bot.pathfinder.isMoving()) {
-                buildUp(bot);
-              }
-              
-              if (!bot.pathfinder.isMoving()) {
-                bot.setControlState('jump', true);
-                bot.setControlState('forward', true);
-                setTimeout(() => {
-                  bot.setControlState('jump', false);
-                  bot.setControlState('forward', false);
-                }, 400);
-              }
-            } else {
-              bot.setControlState('sprint', false);
-              bot.pathfinder.setGoal(null);
-              bot.clearControlStates();
-            }
+            bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
           }
         }
-      }, 300);
+      }, 1000);
 
-      // Attack target loop
       setInterval(() => {
         if (bot.attackTarget && !bot.freezeMode) {
           const target = bot.players[bot.attackTarget]?.entity;
@@ -162,40 +120,14 @@ function createBot(botUsername) {
             }
           }
         }
-      }, 300);
-
-      // Hunt loop
-      setInterval(() => {
-        if (bot.huntTarget && !bot.freezeMode) {
-          const target = bot.players[bot.huntTarget]?.entity;
-          if (target) {
-            const distance = bot.entity.position.distanceTo(target.position);
-            if (distance > 30) {
-              bot.entity.position = target.position.clone();
-            } else {
-              bot.pathfinder.setGoal(new goals.GoalFollow(target, 1), true);
-              if (distance < 3) {
-                bot.attack(target);
-              }
-            }
-          }
-        }
-      }, 300);
-
-      // Wander loop
-      setInterval(() => {
-        if (bot.wanderMode && !bot.freezeMode && !bot.pathfinder.isMoving()) {
-          const radius = bot.wanderMode.radius || 10;
-          const origin = bot.wanderMode.origin;
-          const dx = (Math.random() * 2 - 1) * radius;
-          const dz = (Math.random() * 2 - 1) * radius;
-          bot.pathfinder.setGoal(new goals.GoalNear(origin.x + dx, origin.y, origin.z + dz, 1));
-        }
-      }, 5000);
+      }, 1000);
     });
 
     bot.on('message', (jsonMsg) => {
-      addMCConsoleLog(`[${botUsername}] ${jsonMsg.toString()}`);
+      const msg = jsonMsg.toString();
+      if (!msg.includes('ping')) {
+        addMCConsoleLog(`[${botUsername}] ${msg}`);
+      }
     });
 
     bot.on('error', (err) => {
@@ -206,22 +138,26 @@ function createBot(botUsername) {
     bot.on('kicked', (reason) => {
       addConsoleLog(`${botUsername} Kicked: ${reason}`);
       botStatus[botUsername] = 'kicked';
+      clearInterval(keepAliveInterval);
     });
 
     bot.on('end', (reason) => {
       botStatus[botUsername] = 'offline';
       addConsoleLog(`${botUsername} disconnected: ${reason}`);
+      clearInterval(keepAliveInterval);
+      
       setTimeout(() => {
         if (botStatus[botUsername] === 'offline') {
+          addConsoleLog(`${botUsername} reconnecting...`);
           createBot(botUsername);
         }
-      }, 10000);
+      }, 5000);
     });
 
   } catch (e) {
     addConsoleLog(`${botUsername} Failed: ${e.message}`);
     botStatus[botUsername] = 'error';
-    setTimeout(() => createBot(botUsername), 5000);
+    setTimeout(() => createBot(botUsername), 10000);
   }
 
   function addConsoleLog(message) {
@@ -234,32 +170,6 @@ function createBot(botUsername) {
     const log = `[${new Date().toLocaleTimeString()}] ${message}`;
     mcConsoleLogs.push(log);
     if (mcConsoleLogs.length > 200) mcConsoleLogs.shift();
-  }
-
-  function buildUp(botInstance) {
-    try {
-      const placeableBlock = botInstance.inventory.items().find(item => 
-        item.name.includes('dirt') || 
-        item.name.includes('cobblestone') || 
-        item.name.includes('stone') || 
-        item.name.includes('planks') || 
-        item.name.includes('sand') || 
-        item.name.includes('gravel') ||
-        item.name.includes('netherrack')
-      );
-      
-      if (placeableBlock) {
-        botInstance.equip(placeableBlock, 'hand').then(() => {
-          const refBlock = botInstance.blockAt(botInstance.entity.position.offset(0, -1, 0));
-          if (refBlock) {
-            botInstance.placeBlock(refBlock, { x: 0, y: 1, z: 0 }).then(() => {
-              botInstance.setControlState('jump', true);
-              setTimeout(() => botInstance.setControlState('jump', false), 300);
-            }).catch(() => {});
-          }
-        }).catch(() => {});
-      }
-    } catch (e) {}
   }
 
   function fmtTime(ms) {
@@ -313,7 +223,7 @@ function createBot(botUsername) {
     const targetBots = getTargetBots(botArg);
     
     if (targetBots.length === 0) {
-      safeWhisper(bot, username, "No bots online or bot not found.");
+      safeWhisper(bot, username, "No bots online.");
       return;
     }
 
@@ -327,19 +237,14 @@ function createBot(botUsername) {
     
     try {
       if (command === '!coords') { const p = botInstance.entity.position; safeWhisper(botInstance, username, `${botName} X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
-      if (command === '!status') { safeWhisper(botInstance, username, `${botName} HP:${botInstance.health}/20 Food:${botInstance.food}/20`); return; }
-      if (command === '!players') { safeWhisper(botInstance, username, `${botName} Online: ${Object.keys(botInstance.players).join(', ')}`); return; }
+      if (command === '!status') { safeWhisper(botInstance, username, `${botName} HP:${botInstance.health}/20`); return; }
+      if (command === '!players') { safeWhisper(botInstance, username, `Online: ${Object.keys(botInstance.players).join(', ')}`); return; }
       if (command === '!jump') { botInstance.setControlState('jump', true); setTimeout(() => botInstance.setControlState('jump', false), 500); return; }
-      
       if (command === '!stop') {
         botInstance.pathfinder.setGoal(null); botInstance.clearControlStates();
         botInstance.followTarget = null; botInstance.attackTarget = null; botInstance.huntTarget = null;
-        botInstance.protectMode = false; botInstance.wanderMode = false; botInstance.attackMobs = false; botInstance.mineBlock = null;
-        if (botInstance.textSpamInterval) { clearInterval(botInstance.textSpamInterval); botInstance.textSpamInterval = null; }
-        if (botInstance.spamPrivateInterval) { clearInterval(botInstance.spamPrivateInterval); botInstance.spamPrivateInterval = null; }
         return;
       }
-      
       if (command === '!killbot') { botInstance.chat('/kill'); return; }
       if (command === '!tpbring') {
         botInstance.chat(`/tp ${botInstance.username} ${username}`);
@@ -358,48 +263,15 @@ function createBot(botUsername) {
         return;
       }
       if (command === '!come') {
-        botInstance.followTarget = null; botInstance.huntTarget = null; botInstance.attackTarget = null;
+        botInstance.followTarget = null;
         const target = botInstance.players[username]?.entity;
         if (!target) return;
-        
         const distance = botInstance.entity.position.distanceTo(target.position);
-        
         if (distance > 100) {
           botInstance.entity.position = target.position.clone();
-          return;
+        } else {
+          botInstance.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
         }
-        
-        botInstance.setControlState('sprint', true);
-        botInstance.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
-        
-        const walkInterval = setInterval(() => {
-          const currentTarget = botInstance.players[username]?.entity;
-          if (!currentTarget) { clearInterval(walkInterval); botInstance.setControlState('sprint', false); return; }
-          
-          const currentDistance = botInstance.entity.position.distanceTo(currentTarget.position);
-          const heightDiff = currentTarget.position.y - botInstance.entity.position.y;
-          
-          if (currentDistance <= 2 && Math.abs(heightDiff) <= 1) {
-            clearInterval(walkInterval);
-            botInstance.setControlState('sprint', false);
-            botInstance.pathfinder.setGoal(null);
-            botInstance.clearControlStates();
-            return;
-          }
-          
-          if (heightDiff > 2) buildUp(botInstance);
-          
-          botInstance.pathfinder.setGoal(new goals.GoalNear(currentTarget.position.x, currentTarget.position.y, currentTarget.position.z, 2), true);
-          
-          if (!botInstance.pathfinder.isMoving()) {
-            botInstance.setControlState('jump', true);
-            botInstance.setControlState('forward', true);
-            setTimeout(() => {
-              botInstance.setControlState('jump', false);
-              botInstance.setControlState('forward', false);
-            }, 400);
-          }
-        }, 400);
         return;
       }
       if (command === '!follow') {
@@ -409,19 +281,12 @@ function createBot(botUsername) {
       }
       if (command === '!goto') {
         const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
-        if (!isNaN(x)) {
-          botInstance.followTarget = null;
-          botInstance.setControlState('sprint', true);
-          botInstance.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
-        }
+        if (!isNaN(x)) botInstance.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
         return;
       }
       if (command === '!dig') {
         const block = botInstance.blockAtCursor(10);
-        if (block && botInstance.canDigBlock(block)) {
-          botInstance.lookAt(block.position);
-          botInstance.dig(block).catch(() => {});
-        }
+        if (block && botInstance.canDigBlock(block)) botInstance.dig(block).catch(() => {});
         return;
       }
       if (command === '!mine') {
@@ -429,22 +294,15 @@ function createBot(botUsername) {
         else if (args[1]) { botInstance.mineBlock = args.slice(1).join('_'); }
         return;
       }
-      if (command === '!stopmine') { botInstance.mineBlock = null; return; }
       if (command === '!attack') {
-        if (args[1] && botInstance.players[args[1]]) {
-          botInstance.attackTarget = args[1];
-          botInstance.followTarget = null;
-        }
+        if (args[1] && botInstance.players[args[1]]) botInstance.attackTarget = args[1];
         return;
       }
       if (command === '!hunt') {
-        if (args[1] && botInstance.players[args[1]]) {
-          botInstance.huntTarget = args[1];
-        }
+        if (args[1] && botInstance.players[args[1]]) botInstance.huntTarget = args[1];
         return;
       }
       if (command === '!attackmobs') { botInstance.attackMobs = !botInstance.attackMobs; return; }
-      if (command === '!protect') { botInstance.protectMode = !botInstance.protectMode; return; }
       if (command === '!kick') { if (args[1]) botInstance.chat('/kick ' + args[1]); return; }
       if (command === '!survival' || command === '!survial') { botInstance.chat('/gamemode survival'); return; }
       if (command === '!creative') { botInstance.chat('/gamemode creative'); return; }
@@ -452,58 +310,11 @@ function createBot(botUsername) {
       if (command === '!talk') { if (args[1]) botInstance.chat(args.slice(1).join(' ')); return; }
       if (command === '!shout') { if (args[1]) botInstance.chat(args.slice(1).join(' ').toUpperCase() + '!!!'); return; }
       if (command === '!skydrivebot') { botInstance.chat('/effect give ' + botInstance.username + ' minecraft:levitation 10 100'); return; }
-      if (command === '!skydriveplayers') {
-        const targetName = args[1];
-        if (targetName) {
-          botInstance.chat('/effect give ' + targetName + ' minecraft:levitation 10 100');
-        } else {
-          Object.keys(botInstance.players).forEach(p => {
-            if (p !== botInstance.username) botInstance.chat('/effect give ' + p + ' minecraft:levitation 10 100');
-          });
-        }
-        return;
-      }
       if (command === '!healthgen') { botInstance.chat('/effect give ' + botInstance.username + ' minecraft:instant_health 1 255'); return; }
-      if (command === '!tntrain') {
-        const target = botInstance.players[args[1]]?.entity;
-        if (target) {
-          let count = 0;
-          const tntInterval = setInterval(() => {
-            if (count >= 100) { clearInterval(tntInterval); return; }
-            botInstance.chat(`/summon tnt ${Math.round(target.position.x)} ${Math.round(target.position.y + 15)} ${Math.round(target.position.z)}`);
-            count++;
-          }, 50);
-        }
-        return;
-      }
       if (command === '!stopserver') { botInstance.chat('/stop'); return; }
       if (command === '!leakcoords') {
         const target = botInstance.players[args[1]]?.entity;
         if (target) botInstance.chat(`${args[1]}: X:${Math.round(target.position.x)} Y:${Math.round(target.position.y)} Z:${Math.round(target.position.z)}`);
-        return;
-      }
-      if (command === '!armor') {
-        const armor = botInstance.inventory.items().filter(i => i.name.includes('helmet') || i.name.includes('chestplate') || i.name.includes('leggings') || i.name.includes('boots'));
-        armor.forEach(item => {
-          try {
-            if (item.name.includes('helmet')) botInstance.equip(item, 'head');
-            if (item.name.includes('chestplate')) botInstance.equip(item, 'torso');
-            if (item.name.includes('leggings')) botInstance.equip(item, 'legs');
-            if (item.name.includes('boots')) botInstance.equip(item, 'feet');
-          } catch (e) {}
-        });
-        return;
-      }
-      if (command === '!attachplayer') {
-        if (args[1] && botInstance.players[args[1]]) {
-          botInstance.attachTarget = args[1];
-          botInstance.attackTarget = args[1];
-        }
-        return;
-      }
-      if (command === '!attachmob') {
-        const mob = botInstance.nearestEntity(e => e.type === 'mob' || e.type === 'monster');
-        if (mob) botInstance.attachTarget = mob.id;
         return;
       }
       if (command === '!drop') { const h = botInstance.heldItem; if (h) botInstance.tossStack(h); return; }
@@ -513,29 +324,9 @@ function createBot(botUsername) {
         if (item) botInstance.equip(item, 'hand').catch(() => {});
         return;
       }
-      if (command === '!place') {
-        const item = botInstance.inventory.items().find(i => i.name.includes(args.slice(1).join('_')));
-        const ref = botInstance.blockAtCursor(5);
-        if (item && ref) botInstance.equip(item, 'hand').then(() => botInstance.placeBlock(ref, {x:0,y:1,z:0})).catch(() => {});
-        return;
-      }
-      if (command === '!collect') {
-        const targets = botInstance.findBlocks({ matching: b => b.name.includes(args[1] || ''), maxDistance: 32, count: parseInt(args[2]) || 1 });
-        targets.forEach(pos => {
-          const block = botInstance.blockAt(pos);
-          if (block && botInstance.canDigBlock(block)) botInstance.dig(block).catch(() => {});
-        });
-        return;
-      }
-      if (command === '!blockinfo') { const b = botInstance.blockAtCursor(5); if (b) safeWhisper(botInstance, username, `Block: ${b.name}`); return; }
       if (command === '!nearbyplayers') {
         const list = Object.values(botInstance.players).filter(p => p.entity && p.username !== botInstance.username).map(p => p.username);
         safeWhisper(botInstance, username, list.length ? `Nearby: ${list.join(', ')}` : "No players");
-        return;
-      }
-      if (command === '!nearbymobs') {
-        const mobs = Object.values(botInstance.entities).filter(e => e.type === 'mob' && e !== botInstance.entity).map(e => e.name || 'mob');
-        safeWhisper(botInstance, username, mobs.length ? `Mobs: ${mobs.join(', ')}` : "No mobs");
         return;
       }
       if (command === '!health') {
@@ -548,59 +339,16 @@ function createBot(botUsername) {
         if (target) safeWhisper(botInstance, username, `${args[1]}: X:${Math.round(target.position.x)} Y:${Math.round(target.position.y)} Z:${Math.round(target.position.z)}`);
         return;
       }
-      if (command === '!exp') { safeWhisper(botInstance, username, `XP: ${botInstance.experience.level}`); return; }
-      if (command === '!gamemode') { safeWhisper(botInstance, username, `Gamemode: ${botInstance.game.gameMode}`); return; }
-      if (command === '!uptime') { safeWhisper(botInstance, username, `Uptime: ${fmtTime(Date.now() - spawnTime)}`); return; }
-      if (command === '!echo') { safeWhisper(botInstance, username, args.slice(1).join(' ')); return; }
       if (command === '!ping') { safeWhisper(botInstance, username, `Ping: ${botInstance.player?.ping || 'unknown'}ms`); return; }
-      if (command === '!spin') {
-        let yaw = botInstance.entity.yaw;
-        const interval = setInterval(() => {
-          yaw += Math.PI / 4;
-          botInstance.look(yaw, botInstance.entity.pitch, true);
-          if (yaw >= botInstance.entity.yaw + Math.PI * 2) clearInterval(interval);
-        }, 100);
-        return;
-      }
+      if (command === '!sneak') { botInstance.setControlState('sneak', true); return; }
+      if (command === '!unsneak') { botInstance.setControlState('sneak', false); return; }
       if (command === '!freeze') {
         botInstance.freezeMode = !botInstance.freezeMode;
         if (botInstance.freezeMode) { botInstance.pathfinder.setGoal(null); botInstance.clearControlStates(); }
         return;
       }
-      if (command === '!activate') { const block = botInstance.blockAtCursor(5); if (block) botInstance.activateBlock(block); return; }
-      if (command === '!break') { if (args[1] === 'stop') { botInstance.autoBreakBlock = null; } else { botInstance.autoBreakBlock = args.slice(1).join('_'); } return; }
-      if (command === '!sleeptest') { const bed = botInstance.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 16 }); if (bed) botInstance.sleep(bed).catch(() => {}); return; }
-      if (command === '!textspam') {
-        const targetName = args[1];
-        const text = args.slice(2).join(' ');
-        if (botInstance.textSpamInterval) { clearInterval(botInstance.textSpamInterval); botInstance.textSpamInterval = null; }
-        if (targetName && text) botInstance.textSpamInterval = setInterval(() => safeWhisper(botInstance, targetName, text), 1000);
-        return;
-      }
-      if (command === '!stoptextspam') {
-        if (botInstance.textSpamInterval) { clearInterval(botInstance.textSpamInterval); botInstance.textSpamInterval = null; }
-        if (botInstance.spamPrivateInterval) { clearInterval(botInstance.spamPrivateInterval); botInstance.spamPrivateInterval = null; }
-        return;
-      }
-      if (command === '!unsneak') { botInstance.setControlState('sneak', false); return; }
-      if (command === '!sneak') { botInstance.setControlState('sneak', true); return; }
-      if (command === '!lookatfollow') {
-        const targetName = args[1] || username;
-        const target = botInstance.players[targetName]?.entity;
-        if (target) { botInstance.followTarget = targetName; botInstance.lookAt(target.position.offset(0, target.height, 0)); }
-        return;
-      }
       if (command === '!wander') { botInstance.wanderMode = { radius: parseInt(args[1]) || 10, origin: botInstance.entity.position.clone() }; return; }
       if (command === '!stopwander') { botInstance.wanderMode = false; botInstance.pathfinder.setGoal(null); return; }
-      if (command === '!flee') {
-        const distance = parseInt(args[1]) || 20;
-        const hostile = botInstance.nearestEntity(e => e.type === 'hostile' || e.type === 'monster');
-        if (hostile) {
-          const away = botInstance.entity.position.minus(hostile.position).normalize().scale(distance).plus(botInstance.entity.position);
-          botInstance.pathfinder.setGoal(new goals.GoalNear(away.x, away.y, away.z, 1), true);
-        }
-        return;
-      }
       
     } catch (e) {}
   }
@@ -626,7 +374,7 @@ app.get('/', (req, res) => {
         h1 { color: #4CAF50; text-align: center; }
         .card { background: #16213e; padding: 20px; border-radius: 10px; text-align: center; margin: 10px 0; }
         .value { font-size: 2em; color: #4CAF50; font-weight: bold; }
-        .console { background: #0f3460; padding: 15px; border-radius: 10px; height: 200px; overflow-y: auto; margin: 10px 0; }
+        .console { background: #0f3460; padding: 15px; border-radius: 10px; height: 300px; overflow-y: auto; margin: 10px 0; }
         .log { font-family: monospace; font-size: 12px; }
       </style>
     </head>
