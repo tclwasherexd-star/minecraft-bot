@@ -8,18 +8,34 @@ const config = {
   port: 50838, 
   version: '1.20.1', 
   auth: 'offline',
-  checkTimeoutInterval: 120000, // Longer timeout
-  reconnectDelay: 1000,
-  hideErrors: true, // Hide errors to prevent crashes
-  physicsEnabled: true,
-  chat: 'enabled'
+  checkTimeoutInterval: 120000,
+  hideErrors: true
 };
 
 const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'];
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 
-const NUMBER_OF_BOTS = 10; // Reduced to 5 for stability
+// Realistic player names for bots
+const botNames = [
+  'Steve_Pro',
+  'Alex_Miner',
+  'Diamond_Knight',
+  'Creeper_Slayer',
+  'Enderman_Hunter',
+  'Redstone_Wiz',
+  'Nether_King',
+  'Ender_Dragon',
+  'Wither_Boss',
+  'Herobrine_X',
+  'Shadow_Blade',
+  'Pixel_Warrior',
+  'Minecraft_Legend',
+  'Block_Master',
+  'Craft_King'
+];
+
+const NUMBER_OF_BOTS = botNames.length; // 15 bots
 
 let bots = {};
 let consoleLogs = [];
@@ -34,6 +50,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Website started on port ${PORT}`);
+  console.log(`Running ${NUMBER_OF_BOTS} bots with realistic names`);
   global.startTime = Date.now();
   createNextBot();
 });
@@ -44,14 +61,13 @@ function createNextBot() {
     return;
   }
   
+  const botUsername = botNames[botsCreated];
   botsCreated++;
-  const botUsername = `CloudAFK_Bot${botsCreated}`;
   console.log(`Creating bot ${botsCreated}/${NUMBER_OF_BOTS}: ${botUsername}`);
   
   createBot(botUsername);
   
-  // Longer delay between bots (10 seconds)
-  setTimeout(createNextBot, 10000);
+  setTimeout(createNextBot, 3000);
 }
 
 function createBot(botUsername) {
@@ -71,16 +87,6 @@ function createBot(botUsername) {
     botPlaytime[botUsername] = botPlaytime[botUsername] || 0;
     addConsoleLog(`${botUsername} connecting...`);
 
-    // Keep alive with silent ping
-    const keepAliveInterval = setInterval(() => {
-      if (bot && botStatus[botUsername] === 'online' && bot.entity) {
-        try {
-          bot.setControlState('jump', false);
-          bot.setControlState('forward', false);
-        } catch (e) {}
-      }
-    }, 60000);
-
     bot.on('spawn', () => {
       botStatus[botUsername] = 'online';
       botJoinTime[botUsername] = Date.now();
@@ -99,7 +105,7 @@ function createBot(botUsername) {
       
       bot.pathfinder.setMovements(defaultMove);
       bot.pathfinder.enablePathShortcuts = true;
-      bot.pathfinder.thinkTimeout = 100; // Slower thinking = less resource
+      bot.pathfinder.thinkTimeout = 100;
 
       bot.followTarget = null;
       bot.attackTarget = null;
@@ -109,7 +115,6 @@ function createBot(botUsername) {
       bot.protectMode = false;
       bot.freezeMode = false;
 
-      // Only run loops if bot is online
       setInterval(() => {
         if (bot.followTarget && !bot.freezeMode && bot.entity) {
           const target = bot.players[bot.followTarget]?.entity;
@@ -117,7 +122,7 @@ function createBot(botUsername) {
             bot.pathfinder.setGoal(new goals.GoalFollow(target, 3), true);
           }
         }
-      }, 2000); // Slower loop = more stable
+      }, 2000);
 
       setInterval(() => {
         if (bot.attackTarget && !bot.freezeMode && bot.entity) {
@@ -140,7 +145,6 @@ function createBot(botUsername) {
     });
 
     bot.on('error', (err) => {
-      // Don't log common errors to avoid spam
       if (!err.message.includes('ECONNRESET') && !err.message.includes('ETIMEDOUT')) {
         addConsoleLog(`${botUsername} Error: ${err.message}`);
       }
@@ -154,7 +158,6 @@ function createBot(botUsername) {
         botPlaytime[botUsername] += Date.now() - botJoinTime[botUsername];
         botJoinTime[botUsername] = null;
       }
-      clearInterval(keepAliveInterval);
     });
 
     bot.on('end', (reason) => {
@@ -163,21 +166,19 @@ function createBot(botUsername) {
         botPlaytime[botUsername] += Date.now() - botJoinTime[botUsername];
         botJoinTime[botUsername] = null;
       }
-      clearInterval(keepAliveInterval);
-      addConsoleLog(`${botUsername} disconnected, reconnecting in 15s...`);
+      addConsoleLog(`${botUsername} disconnected, reconnecting in 10s...`);
       
-      // Longer reconnect delay
       setTimeout(() => {
         if (botStatus[botUsername] !== 'online') {
           createBot(botUsername);
         }
-      }, 15000);
+      }, 10000);
     });
 
   } catch (e) {
     addConsoleLog(`${botUsername} Failed: ${e.message}`);
     botStatus[botUsername] = 'error';
-    setTimeout(() => createBot(botUsername), 20000);
+    setTimeout(() => createBot(botUsername), 15000);
   }
 
   function addConsoleLog(message) {
@@ -239,25 +240,17 @@ function createBot(botUsername) {
     
     if (textCommands.includes(command)) {
       const possibleBotArg = args[1];
-      const botNames = ['all'];
-      for (let i = 1; i <= NUMBER_OF_BOTS; i++) {
-        botNames.push(`bot${i}`);
-        botNames.push(`cloudafk_bot${i}`);
-      }
+      const allBotNames = ['all', ...botNames.map(n => n.toLowerCase())];
       
-      if (possibleBotArg && botNames.includes(possibleBotArg.toLowerCase())) {
+      if (possibleBotArg && allBotNames.includes(possibleBotArg.toLowerCase())) {
         botArg = possibleBotArg;
         commandArgs = [args[0], ...args.slice(2)];
       }
     } else {
       const lastArg = args[args.length - 1];
-      const botNames = ['all'];
-      for (let i = 1; i <= NUMBER_OF_BOTS; i++) {
-        botNames.push(`bot${i}`);
-        botNames.push(`cloudafk_bot${i}`);
-      }
+      const allBotNames = ['all', ...botNames.map(n => n.toLowerCase())];
       
-      if (lastArg && botNames.includes(lastArg.toLowerCase())) {
+      if (lastArg && allBotNames.includes(lastArg.toLowerCase())) {
         botArg = lastArg;
         commandArgs = args.slice(0, -1);
       }
@@ -337,9 +330,10 @@ function createBot(botUsername) {
   });
 }
 
-// Simple website
+// Website
 app.get('/', (req, res) => {
   const onlineCount = Object.values(botStatus).filter(s => s === 'online').length;
+  const memUsage = process.memoryUsage();
   
   res.send(`
     <!DOCTYPE html>
@@ -362,10 +356,17 @@ app.get('/', (req, res) => {
     </head>
     <body>
       <h1>CloudAFK Bots Dashboard</h1>
-      <div class="card"><h3>Bots Online</h3><div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div></div>
+      <div class="card">
+        <h3>Bots Online</h3>
+        <div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div>
+      </div>
+      <div class="card">
+        <h3>RAM Usage</h3>
+        <div class="value">${Math.round(memUsage.heapUsed / 1024 / 1024)} MB / 4 GB</div>
+      </div>
       <table>
         <thead>
-          <tr><th>Bot</th><th>Status</th><th>Playtime</th></tr>
+          <tr><th>Bot Name</th><th>Status</th><th>Playtime</th></tr>
         </thead>
         <tbody>
           ${Object.keys(botStatus).map(name => `
