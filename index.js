@@ -34,18 +34,6 @@ let commandHistory = [];
 let mcConsoleLogs = [];
 let consoleLogs = [];
 
-// --- duplicate-command guard ---
-// Prevents the same whisper/chat event from being processed twice
-// (e.g. if a listener ever ends up attached more than once, or a
-// message fires on both 'whisper' and 'chat' in edge cases).
-// --- command leader ---
-// Public "!command" chat messages are broadcast to every connected
-// client, so all 5 bots' own 'chat' listeners were each firing and each
-// independently fanning the command back out to all 5 bots — that was
-// the real source of duplicate replies (multiplicative, not just a
-// timing race). Only ONE bot is allowed to react to public chat
-// commands; whispers are unaffected since a whisper only ever reaches
-// the one bot it was sent to.
 let commandLeaderUsername = null;
 
 function pickNewLeaderIfNeeded() {
@@ -53,7 +41,7 @@ function pickNewLeaderIfNeeded() {
   commandLeaderUsername = Object.keys(botStatus).find(n => botStatus[n] === 'online') || null;
 }
 
-const recentCommands = new Map(); // key -> timestamp
+const recentCommands = new Map();
 const DUPLICATE_WINDOW_MS = 400;
 
 function isDuplicate(username, message) {
@@ -62,7 +50,6 @@ function isDuplicate(username, message) {
   const last = recentCommands.get(key);
   if (last && now - last < DUPLICATE_WINDOW_MS) return true;
   recentCommands.set(key, now);
-  // periodic cleanup so the map doesn't grow forever
   if (recentCommands.size > 200) {
     for (const [k, t] of recentCommands) {
       if (now - t > DUPLICATE_WINDOW_MS * 5) recentCommands.delete(k);
@@ -74,7 +61,6 @@ function isDuplicate(username, message) {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- command reference (used by !help and the web dashboard) ---
 const COMMAND_REFERENCE = [
   { group: 'Targeting', lines: [
     'Add a bot name OR "all" to any command below to choose who runs it.',
@@ -94,8 +80,8 @@ const COMMAND_REFERENCE = [
     '!come [bot|all] — bot walks to you',
     '!follow [player] [bot|all] — bot walks and follows (defaults to you)',
     '!goto <x> <y> <z> [bot|all] — bot walks to coords',
-    '!line [bot|all] — bots line up behind you',
-    '!stop [bot|all] — cancel movement/mining'
+    '!line [bot|all] — bots TELEPORT to line up behind you',
+    '!stop [bot|all] — cancel movement/mining/spam'
   ]},
   { group: 'Teleport (via server /tp — needs bot to have permission)', lines: [
     '!tpbring [bot|all] — bot teleports to you'
@@ -105,6 +91,10 @@ const COMMAND_REFERENCE = [
     '!shout [bot|all] <message> — bot shouts it (ALL CAPS)',
     '!msg [bot|all] <player> <message> — bot whispers a player',
     '!echo [bot|all] <message> — bot whispers it back to you'
+  ]},
+  { group: 'Spam', lines: [
+    '!link <url> [bot|all] — spam the URL in chat (no delay)',
+    '!stoplink [bot|all] — stop spamming the link'
   ]},
   { group: 'Server / self', lines: [
     '!killbot [bot|all] — bot runs /kill on itself',
@@ -116,7 +106,8 @@ const COMMAND_REFERENCE = [
   { group: 'Items / blocks', lines: [
     '!mine <block> [bot|all] — walk to and mine matching block',
     '!stopmine [bot|all] — stop mining',
-    '!dig [bot|all] — dig whatever the bot is looking at',
+    '!dig [bot|all] [block] — dig block at cursor, or start mining a block type',
+    '!armor [bot|all] — equip armor from inventory (first match per slot)',
     '!drop / !dropall [bot|all] — drop held item / entire inventory',
     '!equip <item> [bot|all] — equip a matching item to hand'
   ]},
@@ -151,8 +142,6 @@ function handleCommand(username, message) {
   const args = message.trim().split(' ');
   const command = args[0]?.toLowerCase();
 
-  // !help is handled once, from a single bot, regardless of any
-  // bot-name/"all" targeting — otherwise it'd get sent once per bot.
   if (command === '!help' || command === '!commands') {
     sendHelp(username);
     return;
@@ -160,7 +149,9 @@ function handleCommand(username, message) {
 
   let botArg = null;
 
-  const textCommands = ['!talk', '!shout', '!msg', '!echo'];
+  // Commands where bot target can appear as second argument (before other args)
+  // Also includes commands like !link where the target can be either before or after the main argument.
+  const textCommands = ['!talk', '!shout', '!msg', '!echo', '!dig', '!link'];
 
   if (textCommands.includes(command)) {
     const possibleBotArg = args[1];
@@ -213,11 +204,9 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!gamemode') { safeWhisper(botInstance, username, `Gamemode: ${botInstance.game.gameMode}`); return; }
     if (command === '!uptime') { safeWhisper(botInstance, username, `Uptime: ${fmtTime(Date.now() - botJoinTime[botName])}`); return; }
 
-    // !tpbring - server-side /tp (bot to you), goes through the
-    // server's own command + permission system rather than the bot
-    // spoofing its own position.
+    // !tpbring - server-side /tp (bot to you)
     if (command === '!tpbring') {
-      clearMovement(botInstance); // clear all movement modes
+      clearMovement(botInstance);
       botInstance.chat(`/tp ${botInstance.username} ${username}`);
       safeWhisper(botInstance, username, `${botName} requesting /tp to you!`);
       return;
@@ -227,7 +216,7 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!come') {
       const target = botInstance.players[username]?.entity;
       if (target) {
-        clearMovement(botInstance); // clear follow/mine etc.
+        clearMovement(botInstance);
         botInstance.comingTo = username;
         safeWhisper(botInstance, username, `${botName} walking to you!`);
       } else {
@@ -261,22 +250,24 @@ function executeCommand(botInstance, username, args, command) {
       return;
     }
 
+    // !line - TELEPORT bots into formation
     if (command === '!line') {
       const ownerPlayer = botInstance.players[username]?.entity;
-      if (ownerPlayer) {
-        clearMovement(botInstance);
-        const allOnlineBots = getTargetBots('all');
-        const botIndex = allOnlineBots.indexOf(botInstance);
-        const offset = (botIndex - (allOnlineBots.length - 1) / 2) * 2;
-        const ownerPos = ownerPlayer.position;
-        const yaw = ownerPlayer.yaw;
-        const lineX = ownerPos.x + Math.sin(yaw) * 3 + Math.cos(yaw) * offset;
-        const lineZ = ownerPos.z + Math.cos(yaw) * 3 - Math.sin(yaw) * offset;
-        botInstance.pathfinder.setGoal(new goals.GoalNear(lineX, ownerPos.y, lineZ, 1), true);
-        safeWhisper(botInstance, username, `${botName} walking to line up!`);
-      } else {
+      if (!ownerPlayer) {
         safeWhisper(botInstance, username, "Can't see you to line up.");
+        return;
       }
+      clearMovement(botInstance);
+      const allOnlineBots = getTargetBots('all');
+      const botIndex = allOnlineBots.indexOf(botInstance);
+      const offset = (botIndex - (allOnlineBots.length - 1) / 2) * 2;
+      const ownerPos = ownerPlayer.position;
+      const yaw = ownerPlayer.yaw;
+      const lineX = ownerPos.x + Math.sin(yaw) * 3 + Math.cos(yaw) * offset;
+      const lineZ = ownerPos.z + Math.cos(yaw) * 3 - Math.sin(yaw) * offset;
+      const lineY = ownerPos.y;
+      botInstance.chat(`/tp ${botInstance.username} ${Math.floor(lineX)} ${Math.floor(lineY)} ${Math.floor(lineZ)}`);
+      safeWhisper(botInstance, username, `${botName} teleporting to line up!`);
       return;
     }
 
@@ -284,16 +275,56 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!shout') { if (args[1]) botInstance.chat(args.slice(1).join(' ').toUpperCase() + '!!!'); return; }
     if (command === '!msg') { if (args[1] && args[2]) safeWhisper(botInstance, args[1], args.slice(2).join(' ')); return; }
     if (command === '!echo') { safeWhisper(botInstance, username, args.slice(1).join(' ')); return; }
+
+    // New !link command - spam URL
+    if (command === '!link') {
+      const url = args[1];
+      if (!url) {
+        safeWhisper(botInstance, username, 'Please provide a URL: !link <url>');
+        return;
+      }
+      // Stop any previous spam
+      if (botInstance.spamInterval) {
+        clearInterval(botInstance.spamInterval);
+        botInstance.spamInterval = null;
+      }
+      // Start spamming as fast as possible
+      botInstance.spamInterval = setInterval(() => {
+        if (!botInstance.entity) {
+          clearInterval(botInstance.spamInterval);
+          botInstance.spamInterval = null;
+          return;
+        }
+        botInstance.chat(url);
+      }, 0); // 0ms delay, will be throttled by Node's event loop
+      safeWhisper(botInstance, username, `${botName} is now spamming: ${url}`);
+      return;
+    }
+
+    // !stoplink - stop spamming
+    if (command === '!stoplink') {
+      if (botInstance.spamInterval) {
+        clearInterval(botInstance.spamInterval);
+        botInstance.spamInterval = null;
+        safeWhisper(botInstance, username, `${botName} stopped spamming.`);
+      } else {
+        safeWhisper(botInstance, username, `${botName} is not spamming.`);
+      }
+      return;
+    }
+
     if (command === '!stop') {
       clearMovement(botInstance);
+      // Also stop spam
+      if (botInstance.spamInterval) {
+        clearInterval(botInstance.spamInterval);
+        botInstance.spamInterval = null;
+      }
       botInstance.pathfinder.setGoal(null);
       botInstance.clearControlStates();
       safeWhisper(botInstance, username, `${botName} stopped!`);
       return;
     }
-    // !jump - single hop. If pathfinder is actively walking a goal it
-    // controls jump itself for parkour, so a manual jump would get
-    // fought/overridden; only allow it when the bot isn't mid-path.
     if (command === '!jump') {
       if (botInstance.pathfinder.isMoving()) {
         safeWhisper(botInstance, username, `${botName} is walking, can't jump on command right now.`);
@@ -303,9 +334,6 @@ function executeCommand(botInstance, username, args, command) {
       setTimeout(() => botInstance.setControlState('jump', false), 500);
       return;
     }
-    // Explicit self-target: a bare "/kill" is ambiguous on some
-    // permission plugins (they expect a target argument), so name the
-    // bot directly. Confirmation added so you can see it was sent.
     if (command === '!killbot') {
       botInstance.chat(`/kill ${botInstance.username}`);
       safeWhisper(botInstance, username, `${botName} requesting /kill on self!`);
@@ -318,7 +346,7 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!kick') { if (args[1]) botInstance.chat('/kick ' + args[1]); return; }
     if (command === '!mine') {
       if (args[1]) {
-        clearMovement(botInstance); // stop any other movement modes
+        clearMovement(botInstance);
         botInstance.mineBlock = args.slice(1).join('_');
         safeWhisper(botInstance, username, `${botName} now mining ${botInstance.mineBlock.replace(/_/g, ' ')}`);
       }
@@ -332,12 +360,45 @@ function executeCommand(botInstance, username, args, command) {
       }
       return;
     }
-    // !dig - dig block at cursor, raycast distance increased to 128
+
+    // !dig - improved: optional block name to start mining, otherwise dig at cursor
     if (command === '!dig') {
-      const block = botInstance.blockAtCursor(128);
-      if (block) botInstance.dig(block).catch(() => {});
+      const blockName = args.slice(1).join('_');
+      if (blockName) {
+        // Start mining that block type
+        clearMovement(botInstance);
+        botInstance.mineBlock = blockName;
+        safeWhisper(botInstance, username, `${botName} now digging ${blockName.replace(/_/g, ' ')}`);
+      } else {
+        // Dig block at cursor (raycast 128)
+        const block = botInstance.blockAtCursor(128);
+        if (block) botInstance.dig(block).catch(() => {});
+      }
       return;
     }
+
+    // !armor - simple: equip first matching armor for each slot (no best sorting)
+    if (command === '!armor') {
+      const armorSlots = {
+        'head': ['helmet', 'cap', 'hood', 'crown'],
+        'torso': ['chestplate', 'tunic', 'plate', 'chest'],
+        'legs': ['leggings', 'pants', 'legs'],
+        'feet': ['boots', 'shoes', 'slippers']
+      };
+      const items = botInstance.inventory.items();
+      const equipped = [];
+      for (const slot in armorSlots) {
+        const keywords = armorSlots[slot];
+        const armorItem = items.find(i => keywords.some(k => i.name.includes(k)));
+        if (armorItem) {
+          botInstance.equip(armorItem, slot).catch(() => {});
+          equipped.push(slot);
+        }
+      }
+      safeWhisper(botInstance, username, equipped.length ? `${botName} equipped armor: ${equipped.join(', ')}` : `${botName} found no armor to equip.`);
+      return;
+    }
+
     if (command === '!drop') { const h = botInstance.heldItem; if (h) botInstance.tossStack(h).catch(() => {}); return; }
     if (command === '!dropall') { botInstance.inventory.items().forEach(i => botInstance.tossStack(i).catch(() => {})); return; }
     if (command === '!equip') {
@@ -350,7 +411,6 @@ function executeCommand(botInstance, username, args, command) {
       safeWhisper(botInstance, username, list.length ? `Nearby: ${list.join(', ')}` : "No players");
       return;
     }
-    // !health - fixed to only use specified player, no fallback
     if (command === '!health') {
       const targetName = args[1] || username;
       const target = botInstance.players[targetName]?.entity;
@@ -375,7 +435,6 @@ function executeCommand(botInstance, username, args, command) {
   } catch (e) {}
 }
 
-// Helper to clear all movement-related states to avoid conflicts
 function clearMovement(bot) {
   bot.followTarget = null;
   bot.comingTo = null;
@@ -403,7 +462,6 @@ function createAllBots() {
 }
 
 function createBot(botUsername) {
-  // Prevent overlapping reconnect attempts for the same bot name
   if (botStatus[botUsername] === 'connecting' || botStatus[botUsername] === 'online') return;
 
   const botConfig = { ...config, username: botUsername };
@@ -418,9 +476,6 @@ function createBot(botUsername) {
     consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} connecting...`);
     if (consoleLogs.length > 100) consoleLogs.shift();
 
-    // .once ensures spawn logic (including interval setup) can never
-    // double-fire on the same bot instance, which was the root cause
-    // of duplicate command responses after reconnect races.
     bot.once('spawn', () => {
       botStatus[botUsername] = 'online';
       botJoinTime[botUsername] = Date.now();
@@ -439,9 +494,9 @@ function createBot(botUsername) {
       bot.comingTo = null;
       bot.mineBlock = null;
       bot._activeGoalKey = null;
+      bot.spamInterval = null; // for !link spam
       let stuckTicks = 0;
 
-      // FOLLOW LOOP - WALKS to target
       bot.followInterval = setInterval(() => {
         if (bot.followTarget && bot.entity) {
           const target = bot.players[bot.followTarget]?.entity;
@@ -482,7 +537,6 @@ function createBot(botUsername) {
         }
       }, 500);
 
-      // COME LOOP - WALKS to player
       bot.comeInterval = setInterval(() => {
         if (bot.comingTo && bot.entity) {
           const target = bot.players[bot.comingTo]?.entity;
@@ -522,11 +576,8 @@ function createBot(botUsername) {
         }
       }, 500);
 
-      // MINE LOOP - now actually walks to the block before digging
       bot.mineInterval = setInterval(() => {
-        // Only run mine loop if not following/coming
         if (bot.mineBlock && bot.entity && !bot.followTarget && !bot.comingTo) {
-          // No maxDistance - search all loaded chunks
           const blocks = bot.findBlocks({ matching: b => b.name.includes(bot.mineBlock), count: 1 });
           if (blocks.length > 0) {
             const blockPos = blocks[0];
@@ -536,7 +587,6 @@ function createBot(botUsername) {
             const goalKey = `mine:${bot.mineBlock}:${blockPos}`;
 
             if (distance > 4) {
-              // too far to dig — walk to it first
               if (bot._activeGoalKey !== goalKey) {
                 bot.pathfinder.setGoal(new goals.GoalNear(blockPos.x, blockPos.y, blockPos.z, 2), true);
                 bot._activeGoalKey = goalKey;
@@ -553,11 +603,6 @@ function createBot(botUsername) {
       }, 500);
     });
 
-    // .once here too — a bot instance should only ever log one 'message'
-    // handler's worth of output; the risk of a stray duplicate listener
-    // came from re-registering handlers on objects that lingered after
-    // 'end'/'kicked'. Wiring everything inside createBot() (one fresh
-    // bot object per attempt) plus these guards eliminates that.
     bot.on('message', (jsonMsg) => {
       const msg = jsonMsg.toString();
       mcConsoleLogs.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
@@ -575,13 +620,9 @@ function createBot(botUsername) {
       consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} kicked: ${reason}`);
       if (consoleLogs.length > 100) consoleLogs.shift();
       cleanupBot(bot);
-      // Reconnect is handled in 'end' event, no need to schedule here
     });
 
     bot.once('end', () => {
-      // Only mark offline / reconnect if this bot instance is still the
-      // "current" one for this username — avoids a stale instance from
-      // a previous failed attempt triggering a second reconnect chain.
       if (bots[botUsername] !== bot) return;
       botStatus[botUsername] = 'offline';
       pickNewLeaderIfNeeded();
@@ -596,8 +637,6 @@ function createBot(botUsername) {
       if (myUsername.includes(username.toLowerCase())) handleCommand(username, message);
     });
     bot.on('chat', (username, message) => {
-      // Only the current command leader acts on public chat commands —
-      // see the comment above commandLeaderUsername for why.
       if (bot.username !== commandLeaderUsername) return;
       if (username !== bot.username && message.startsWith('!') && myUsername.includes(username.toLowerCase())) {
         handleCommand(username, message);
@@ -616,9 +655,28 @@ function cleanupBot(bot) {
   clearInterval(bot.followInterval);
   clearInterval(bot.comeInterval);
   clearInterval(bot.mineInterval);
+  clearInterval(bot.spamInterval); // clear spam interval on disconnect
 }
 
-// WEBSITE
+// API endpoint for website auto-update
+app.get('/api/status', (req, res) => {
+  const onlineCount = Object.values(botStatus).filter(s => s === 'online').length;
+  const uptime = fmtTime(Date.now() - (global.startTime || Date.now()));
+  const botCards = botNames.map(name => {
+    const status = botStatus[name] || 'offline';
+    const playtime = fmtTime((botPlaytime[name] || 0) + (botJoinTime[name] && status === 'online' ? Date.now() - botJoinTime[name] : 0));
+    return { name, status, playtime };
+  });
+  res.json({
+    onlineCount,
+    uptime,
+    totalCommandsExecuted,
+    botCards,
+    consoleLogs: consoleLogs.slice(-15),
+    mcConsoleLogs: mcConsoleLogs.slice(-15)
+  });
+});
+
 app.post('/api/botcommand', (req, res) => {
   const cmd = req.body.command;
   if (cmd) handleCommand(myUsername[0], cmd);
@@ -634,24 +692,11 @@ app.post('/api/mccommand', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  const onlineCount = Object.values(botStatus).filter(s => s === 'online').length;
-  const uptime = fmtTime(Date.now() - (global.startTime || Date.now()));
-
-  let botCards = botNames.map(name => {
-    const status = botStatus[name] || 'offline';
-    const playtime = fmtTime((botPlaytime[name] || 0) + (botJoinTime[name] && status === 'online' ? Date.now() - botJoinTime[name] : 0));
-    let statusColor = '#ff4444';
-    if (status === 'online') statusColor = '#4CAF50';
-    else if (status === 'connecting') statusColor = '#FFA500';
-    return `<div style="background: #16213e; border-radius: 10px; padding: 15px; text-align: center;"><h3>${name}</h3><div style="color: ${statusColor}; font-weight: bold;">${status}</div><div style="color: #4CAF50;">${playtime}</div></div>`;
-  }).join('');
-
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
       <title>CloudAFK Bot Army</title>
-      <meta http-equiv="refresh" content="10">
       <style>
         body { font-family: Arial; background: #1a1a2e; color: white; padding: 20px; }
         h1 { color: #4CAF50; text-align: center; }
@@ -670,11 +715,11 @@ app.get('/', (req, res) => {
     <body>
       <h1>CloudAFK Bot Army</h1>
       <div class="grid">
-        <div class="card"><h3>Bots Online</h3><div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div></div>
-        <div class="card"><h3>Uptime</h3><div class="value">${uptime}</div></div>
-        <div class="card"><h3>Commands</h3><div class="value">${totalCommandsExecuted}</div></div>
+        <div class="card"><h3>Bots Online</h3><div class="value" id="onlineCount">0</div></div>
+        <div class="card"><h3>Uptime</h3><div class="value" id="uptime">0s</div></div>
+        <div class="card"><h3>Commands</h3><div class="value" id="commandCount">0</div></div>
       </div>
-      <div class="bots">${botCards}</div>
+      <div class="bots" id="botCards"></div>
 
       <div class="console" style="height: 220px;">
         <h3>Commands</h3>
@@ -684,17 +729,45 @@ app.get('/', (req, res) => {
         `).join('')}
       </div>
 
-      <div class="console">
+      <div class="console" id="botConsole">
         <h3>Bot Console</h3>
-        ${consoleLogs.slice(-15).map(l => `<div class="log" style="color:#4CAF50;">${l}</div>`).join('') || '<div class="log">No logs</div>'}
       </div>
       <form action="/api/botcommand" method="POST"><input type="text" name="command" placeholder="Bot command... !come all" required><button>Send</button></form>
 
-      <div class="console">
+      <div class="console" id="mcConsole">
         <h3>MC Console</h3>
-        ${mcConsoleLogs.slice(-15).map(l => `<div class="log">${l}</div>`).join('') || '<div class="log">No messages</div>'}
       </div>
       <form action="/api/mccommand" method="POST"><input type="text" name="command" placeholder="MC command... /time set day" required><button>Send</button></form>
+
+      <script>
+        function updateStatus() {
+          fetch('/api/status')
+            .then(res => res.json())
+            .then(data => {
+              document.getElementById('onlineCount').textContent = data.onlineCount + ' / ${NUMBER_OF_BOTS}';
+              document.getElementById('uptime').textContent = data.uptime;
+              document.getElementById('commandCount').textContent = data.totalCommandsExecuted;
+
+              const botCardsDiv = document.getElementById('botCards');
+              botCardsDiv.innerHTML = data.botCards.map(bot => {
+                let statusColor = '#ff4444';
+                if (bot.status === 'online') statusColor = '#4CAF50';
+                else if (bot.status === 'connecting') statusColor = '#FFA500';
+                return '<div style="background: #16213e; border-radius: 10px; padding: 15px; text-align: center;"><h3>' + bot.name + '</h3><div style="color: ' + statusColor + '; font-weight: bold;">' + bot.status + '</div><div style="color: #4CAF50;">' + bot.playtime + '</div></div>';
+              }).join('');
+
+              const botConsole = document.getElementById('botConsole');
+              botConsole.innerHTML = '<h3>Bot Console</h3>' + (data.consoleLogs.map(l => '<div class="log" style="color:#4CAF50;">' + l + '</div>').join('') || '<div class="log">No logs</div>');
+
+              const mcConsole = document.getElementById('mcConsole');
+              mcConsole.innerHTML = '<h3>MC Console</h3>' + (data.mcConsoleLogs.map(l => '<div class="log">' + l + '</div>').join('') || '<div class="log">No messages</div>');
+            })
+            .catch(err => console.error('Update failed', err));
+        }
+
+        updateStatus();
+        setInterval(updateStatus, 10000);
+      </script>
     </body>
     </html>
   `);
