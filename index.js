@@ -79,15 +79,21 @@ function createBot() {
         }
       }, 500);
 
-      // Follow loop - WORKS FROM ANY DISTANCE
+      // Follow loop - WALKS to target
       setInterval(() => {
         if (followTarget && !freezeMode) {
           const target = bot.players[followTarget]?.entity;
           if (target) {
             const distance = bot.entity.position.distanceTo(target.position);
             if (distance > 2) {
-              // Always teleport if not close enough (works from any distance)
-              bot.entity.position = target.position.clone();
+              bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+              if (!bot.pathfinder.isMoving()) {
+                bot.setControlState('jump', true);
+                setTimeout(() => bot.setControlState('jump', false), 300);
+              }
+            } else {
+              bot.pathfinder.setGoal(null);
+              bot.clearControlStates();
             }
           }
         }
@@ -101,8 +107,7 @@ function createBot() {
         if (lastPos && pos.distanceTo(lastPos) < 0.2 && bot.pathfinder.goal) {
           stuckCount++;
           if (stuckCount > 5) {
-            addConsoleLog('Bot stuck, resetting...');
-            bot.pathfinder.setGoal(null);
+            addConsoleLog('Bot stuck, jumping...');
             bot.setControlState('jump', true);
             setTimeout(() => bot.setControlState('jump', false), 500);
             stuckCount = 0;
@@ -168,7 +173,7 @@ function createBot() {
       "",
       "INFO: !coords !status !info !players !nearbyplayers !nearbymobs !health [p] !whereis [p] !leakcoords [p] !exp !gamemode !uptime",
       "",
-      "MOVEMENT: !come !follow [p] !goto x y z !wander !stopwander !attachplayer [p] !attachmob !jump !stop !tpbring !tp [p] !call !skydrivebot !skydriveplayers [p] !lookatfollow [p] !flee [distance]",
+      "MOVEMENT: !come (walks) !follow [p] (walks) !goto x y z !wander !stopwander !attachplayer [p] !attachmob !jump !stop !tpbring (tp) !tp [p] !call !skydrivebot !skydriveplayers [p] !lookatfollow [p] !flee [distance]",
       "",
       "COMBAT: !attack [p] !hunt [p] !protect !killbot !kick [p] !attackmobs !tntrain [p] !stopserver !healthgen",
       "",
@@ -215,40 +220,49 @@ function createBot() {
       
       if (command === '!killbot') { bot.chat('/kill'); safeWhisper(username, "Killing bot!"); return; }
       
-      // FIXED !tpbring - ALWAYS WORKS FROM ANY DISTANCE
+      // FIXED !tpbring - Uses /tp command which always works
       if (command === '!tpbring') {
-        const player = bot.players[username];
-        if (!player) {
-          safeWhisper(username, "Cannot find you in player list.");
-          return;
-        }
-        
-        // Always teleport directly to player position if entity available
-        if (player.entity && player.entity.position) {
-          bot.entity.position = player.entity.position.clone();
-          safeWhisper(username, "Teleported bot to you! (any distance)");
-        } else {
-          // Fallback to /tp command
-          bot.chat(`/tp ${bot.username} ${username}`);
-          safeWhisper(username, "Teleporting via command...");
-        }
+        // Use /tp command to teleport bot to player
+        bot.chat(`/tp ${bot.username} ${username}`);
+        safeWhisper(username, "Teleporting bot to you via /tp command...");
         return;
       }
       
-      // IMPROVED !come - WORKS FROM ANY DISTANCE (INFINITE)
+      // !come - WALKS to player (not teleport)
       if (command === '!come') {
         followTarget = null; huntTarget = null; attackTarget = null;
         const target = bot.players[username]?.entity;
         if (!target) {
-          // Player entity not loaded, use /tp command
-          bot.chat(`/tp ${bot.username} ${username}`);
-          safeWhisper(username, "Teleporting to you via command...");
+          safeWhisper(username, "Can't see you. Try !tpbring to teleport bot to you.");
           return;
         }
         
-        // Always teleport directly (works from ANY distance)
-        bot.entity.position = target.position.clone();
-        safeWhisper(username, "Teleported to you! (works from any distance)");
+        const distance = bot.entity.position.distanceTo(target.position);
+        safeWhisper(username, `Walking to you! Distance: ${Math.round(distance)} blocks`);
+        
+        // Walk to player
+        bot.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
+        
+        // Anti-stuck while walking
+        const walkInterval = setInterval(() => {
+          const currentTarget = bot.players[username]?.entity;
+          if (!currentTarget) {
+            clearInterval(walkInterval);
+            return;
+          }
+          const currentDistance = bot.entity.position.distanceTo(currentTarget.position);
+          if (currentDistance <= 2) {
+            clearInterval(walkInterval);
+            bot.pathfinder.setGoal(null);
+            bot.clearControlStates();
+            safeWhisper(username, "Arrived!");
+          } else if (!bot.pathfinder.isMoving()) {
+            bot.setControlState('jump', true);
+            setTimeout(() => bot.setControlState('jump', false), 400);
+            // Update goal if player moved
+            bot.pathfinder.setGoal(new goals.GoalNear(currentTarget.position.x, currentTarget.position.y, currentTarget.position.z, 2), true);
+          }
+        }, 1000);
         return;
       }
       
@@ -418,7 +432,7 @@ function createBot() {
         const targetName = args[1] || username;
         if (bot.players[targetName]) {
           followTarget = targetName; huntTarget = null; attackTarget = null;
-          safeWhisper(username, `Following ${targetName} (teleports to them)`);
+          safeWhisper(username, `Following ${targetName} (walking)`);
         }
         return;
       }
