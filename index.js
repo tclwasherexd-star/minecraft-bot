@@ -9,17 +9,14 @@ const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 
-// Generate bot configs - change 10 to 100 for 100 bots
+// Number of bots to create
 const NUMBER_OF_BOTS = 10;
-const botConfigs = [];
-for (let i = 1; i <= NUMBER_OF_BOTS; i++) {
-  botConfigs.push({ username: `CloudAFK_Bot${i}` });
-}
 
 let bots = {};
 let consoleLogs = [];
 let mcConsoleLogs = [];
 let botStatus = {};
+let botsCreated = 0;
 
 app.use(express.json());
 
@@ -27,14 +24,24 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Website started on port ${PORT}`);
   console.log(`Creating ${NUMBER_OF_BOTS} bots...`);
-  
-  // Create bots with delay to avoid rate limiting
-  botConfigs.forEach((botConfig, index) => {
-    setTimeout(() => {
-      createBot(botConfig.username);
-    }, index * 1000); // 1 second delay between each bot
-  });
+  createNextBot();
 });
+
+function createNextBot() {
+  if (botsCreated >= NUMBER_OF_BOTS) {
+    console.log(`All ${NUMBER_OF_BOTS} bots created!`);
+    return;
+  }
+  
+  botsCreated++;
+  const botUsername = `CloudAFK_Bot${botsCreated}`;
+  console.log(`Creating bot ${botsCreated}/${NUMBER_OF_BOTS}: ${botUsername}`);
+  
+  createBot(botUsername);
+  
+  // Create next bot after 3 seconds
+  setTimeout(createNextBot, 3000);
+}
 
 function createBot(botUsername) {
   const botConfig = { ...config, username: botUsername };
@@ -83,6 +90,7 @@ function createBot(botUsername) {
       bot.textSpamInterval = null;
       bot.spamPrivateInterval = null;
 
+      // Auto-mine loop
       setInterval(() => {
         if (bot.mineBlock && !bot.freezeMode) {
           const blocks = bot.findBlocks({
@@ -99,6 +107,7 @@ function createBot(botUsername) {
         }
       }, 200);
 
+      // Attack mobs loop
       setInterval(() => {
         if (bot.attackMobs && !bot.freezeMode) {
           const target = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'monster' || e.type === 'hostile') && e !== bot.entity);
@@ -109,6 +118,7 @@ function createBot(botUsername) {
         }
       }, 300);
 
+      // Follow loop
       setInterval(() => {
         if (bot.followTarget && !bot.freezeMode) {
           const target = bot.players[bot.followTarget]?.entity;
@@ -141,6 +151,7 @@ function createBot(botUsername) {
         }
       }, 300);
 
+      // Attack target loop
       setInterval(() => {
         if (bot.attackTarget && !bot.freezeMode) {
           const target = bot.players[bot.attackTarget]?.entity;
@@ -153,6 +164,7 @@ function createBot(botUsername) {
         }
       }, 300);
 
+      // Hunt loop
       setInterval(() => {
         if (bot.huntTarget && !bot.freezeMode) {
           const target = bot.players[bot.huntTarget]?.entity;
@@ -170,6 +182,7 @@ function createBot(botUsername) {
         }
       }, 300);
 
+      // Wander loop
       setInterval(() => {
         if (bot.wanderMode && !bot.freezeMode && !bot.pathfinder.isMoving()) {
           const radius = bot.wanderMode.radius || 10;
@@ -198,12 +211,17 @@ function createBot(botUsername) {
     bot.on('end', (reason) => {
       botStatus[botUsername] = 'offline';
       addConsoleLog(`${botUsername} disconnected: ${reason}`);
-      setTimeout(() => createBot(botUsername), 5000);
+      setTimeout(() => {
+        if (botStatus[botUsername] === 'offline') {
+          createBot(botUsername);
+        }
+      }, 10000);
     });
 
   } catch (e) {
     addConsoleLog(`${botUsername} Failed: ${e.message}`);
-    setTimeout(() => createBot(botUsername), 3000);
+    botStatus[botUsername] = 'error';
+    setTimeout(() => createBot(botUsername), 5000);
   }
 
   function addConsoleLog(message) {
@@ -253,35 +271,6 @@ function createBot(botUsername) {
     try { botInstance.whisper(target, text); } catch (e) {}
   }
 
-  function showCmdList(botInstance, username) {
-    const lines = [
-      `=== CLOUDAFK BOT (${botInstance.username}) ===`,
-      `Total Bots: ${NUMBER_OF_BOTS}`,
-      "Owner: " + myUsername.join(', '),
-      "",
-      "Use: !command [botname] - Control specific bot",
-      "Use: !command all - Control all bots",
-      "Example: !come CloudAFK_Bot1",
-      "Example: !come all",
-      "Example: !talk hello all",
-      "",
-      "INFO: !coords !status !info !players !nearbyplayers !nearbymobs !health [p] !whereis [p] !leakcoords [p] !exp !gamemode !uptime",
-      "",
-      "MOVEMENT: !come !follow [p] !goto x y z !wander !stopwander !attachplayer [p] !attachmob !jump !stop !tpbring !tp [p] !call !skydrivebot !skydriveplayers [p] !lookatfollow [p] !flee [distance]",
-      "",
-      "COMBAT: !attack [p] !hunt [p] !protect !killbot !kick [p] !attackmobs !tntrain [p] !stopserver !healthgen",
-      "",
-      "ACTIONS: !talk [msg] !shout [msg] !msg [p] [msg] !textspam [p] [msg] !spamprivmsg [p] [msg] !stoptextspam !click !sneak !unsneak !activate !survival !creative",
-      "",
-      "BUILDING: !place [item] !dig !mine [block] !stopmine !collect [block] [amt] !blockinfo",
-      "",
-      "INVENTORY: !drop !dropall !equip [item] !armor",
-      "",
-      "FUN: !echo [msg] !ping !spin"
-    ];
-    lines.forEach((line, i) => setTimeout(() => safeWhisper(botInstance, username, line), i * 75));
-  }
-
   function getTargetBots(botArg) {
     if (!botArg || botArg.toLowerCase() === 'all') {
       return Object.values(bots).filter(b => b && botStatus[b.username] === 'online');
@@ -310,8 +299,9 @@ function createBot(botUsername) {
     
     let botArg = null;
     const lastArg = args[args.length - 1];
-    const botNames = ['all', 'bot1', 'bot2', 'bot3', 'bot4', 'bot5', 'bot6', 'bot7', 'bot8', 'bot9', 'bot10'];
+    const botNames = ['all'];
     for (let i = 1; i <= NUMBER_OF_BOTS; i++) {
+      botNames.push(`bot${i}`);
       botNames.push(`cloudafk_bot${i}`);
     }
     
@@ -336,7 +326,6 @@ function createBot(botUsername) {
     const botName = botInstance.username;
     
     try {
-      if (command === '!cmdlist' || command === '!help') { showCmdList(botInstance, username); return; }
       if (command === '!coords') { const p = botInstance.entity.position; safeWhisper(botInstance, username, `${botName} X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
       if (command === '!status') { safeWhisper(botInstance, username, `${botName} HP:${botInstance.health}/20 Food:${botInstance.food}/20`); return; }
       if (command === '!players') { safeWhisper(botInstance, username, `${botName} Online: ${Object.keys(botInstance.players).join(', ')}`); return; }
@@ -613,9 +602,7 @@ function createBot(botUsername) {
         return;
       }
       
-    } catch (e) {
-      // Silently fail for multi-bot
-    }
+    } catch (e) {}
   }
 
   bot.on('whisper', (username, message) => handleCommand(username, message));
@@ -646,8 +633,7 @@ app.get('/', (req, res) => {
     <body>
       <h1>CloudAFK Bots Dashboard</h1>
       <div class="card"><h3>Bots Online</h3><div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div></div>
-      <div class="console"><h3>Bot Console</h3>${consoleLogs.slice(-20).map(l => `<div class="log">${l}</div>`).join('')}</div>
-      <div class="console"><h3>MC Console</h3>${mcConsoleLogs.slice(-20).map(l => `<div class="log">${l}</div>`).join('')}</div>
+      <div class="console"><h3>Bot Console</h3>${consoleLogs.slice(-30).map(l => `<div class="log">${l}</div>`).join('')}</div>
     </body>
     </html>
   `);
