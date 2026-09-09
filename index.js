@@ -13,6 +13,8 @@ let consoleLogs = [];
 let mcConsoleLogs = [];
 let botStatus = 'offline';
 let reconnectAttempts = 0;
+let lastCommand = null;
+let lastCommandUser = null;
 
 app.use(express.json());
 
@@ -37,21 +39,32 @@ function createBot() {
       
       const mcData = require('minecraft-data')(bot.version);
       defaultMove = new Movements(bot, mcData);
+      
       defaultMove.canDig = true;
       defaultMove.allow1by1towers = false;
       defaultMove.allowParkour = true;
       defaultMove.allowSprinting = true;
-      defaultMove.maxDropDown = 4;
-      defaultMove.liquidCost = 10;
+      defaultMove.maxDropDown = 5;
+      defaultMove.liquidCost = 5;
       defaultMove.avoidDamage = true;
       defaultMove.allowFreeMotion = true;
       defaultMove.allowEntityDetection = true;
       defaultMove.blocksToAvoid = new Set(['lava', 'water', 'fire', 'cactus']);
+      defaultMove.blocksCantBreak = new Set();
+      defaultMove.scafoldingBlocks = [];
+      
       bot.pathfinder.setMovements(defaultMove);
       bot.pathfinder.enablePathShortcuts = true;
-      bot.pathfinder.thinkTimeout = 50;
+      bot.pathfinder.thinkTimeout = 20;
 
-      // Auto-mine loop
+      if (lastCommand && lastCommandUser) {
+        setTimeout(() => {
+          handleCommand(lastCommandUser, lastCommand);
+          lastCommand = null;
+          lastCommandUser = null;
+        }, 2000);
+      }
+
       setInterval(() => {
         if (mineBlock && !freezeMode) {
           const blocks = bot.findBlocks({
@@ -66,9 +79,8 @@ function createBot() {
             }
           }
         }
-      }, 300);
+      }, 200);
 
-      // Attack mobs loop
       setInterval(() => {
         if (attackMobs && !freezeMode) {
           const target = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'monster' || e.type === 'hostile' || e.type === 'player') && e !== bot.entity);
@@ -77,46 +89,83 @@ function createBot() {
             bot.attack(target);
           }
         }
-      }, 500);
+      }, 300);
 
-      // Follow loop - WALKS to target
       setInterval(() => {
         if (followTarget && !freezeMode) {
           const target = bot.players[followTarget]?.entity;
           if (target) {
             const distance = bot.entity.position.distanceTo(target.position);
-            if (distance > 2) {
+            if (distance > 3) {
+              bot.setControlState('sprint', true);
               bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+              
               if (!bot.pathfinder.isMoving()) {
                 bot.setControlState('jump', true);
-                setTimeout(() => bot.setControlState('jump', false), 300);
+                bot.setControlState('forward', true);
+                setTimeout(() => {
+                  bot.setControlState('jump', false);
+                  bot.setControlState('forward', false);
+                }, 400);
               }
             } else {
+              bot.setControlState('sprint', false);
               bot.pathfinder.setGoal(null);
               bot.clearControlStates();
             }
           }
         }
-      }, 500);
+      }, 300);
 
-      // Auto-reload if stuck
       let lastPos = null;
       let stuckCount = 0;
+      
       setInterval(() => {
         const pos = bot.entity.position;
         if (lastPos && pos.distanceTo(lastPos) < 0.2 && bot.pathfinder.goal) {
           stuckCount++;
-          if (stuckCount > 5) {
-            addConsoleLog('Bot stuck, jumping...');
+          
+          if (stuckCount === 2) {
             bot.setControlState('jump', true);
-            setTimeout(() => bot.setControlState('jump', false), 500);
+            setTimeout(() => bot.setControlState('jump', false), 400);
+          } else if (stuckCount === 4) {
+            bot.setControlState('forward', true);
+            setTimeout(() => bot.setControlState('forward', false), 800);
+          } else if (stuckCount === 6) {
+            bot.setControlState('jump', true);
+            bot.setControlState('forward', true);
+            setTimeout(() => {
+              bot.setControlState('jump', false);
+              bot.setControlState('forward', false);
+            }, 600);
+          } else if (stuckCount === 8) {
+            bot.setControlState('jump', true);
+            bot.setControlState('sprint', true);
+            bot.setControlState('forward', true);
+            setTimeout(() => {
+              bot.setControlState('jump', false);
+              bot.setControlState('sprint', false);
+              bot.setControlState('forward', false);
+            }, 800);
+          } else if (stuckCount >= 10) {
+            const block = bot.blockAtCursor(5);
+            if (block && bot.canDigBlock(block)) {
+              bot.dig(block).catch(() => {});
+            }
+            
+            addConsoleLog('Bot stuck, relogging...');
+            if (followTarget) {
+              lastCommand = `!follow ${followTarget}`;
+              lastCommandUser = myUsername[0];
+            }
+            bot.end('Stuck - relogging');
             stuckCount = 0;
           }
         } else {
           stuckCount = 0;
         }
         lastPos = pos.clone();
-      }, 1000);
+      }, 400);
     });
 
     bot.on('message', (jsonMsg) => {
@@ -135,14 +184,15 @@ function createBot() {
 
     bot.on('end', (reason) => {
       botStatus = 'offline';
+      addConsoleLog('Bot disconnected: ' + reason);
       reconnectAttempts++;
-      const delay = Math.min(5000 * reconnectAttempts, 30000);
+      const delay = Math.min(2000 * reconnectAttempts, 10000);
       setTimeout(createBot, delay);
     });
 
   } catch (e) {
     addConsoleLog('Failed: ' + e.message);
-    setTimeout(createBot, 10000);
+    setTimeout(createBot, 3000);
   }
 
   function addConsoleLog(message) {
@@ -220,49 +270,93 @@ function createBot() {
       
       if (command === '!killbot') { bot.chat('/kill'); safeWhisper(username, "Killing bot!"); return; }
       
-      // FIXED !tpbring - Uses /tp command which always works
       if (command === '!tpbring') {
-        // Use /tp command to teleport bot to player
         bot.chat(`/tp ${bot.username} ${username}`);
-        safeWhisper(username, "Teleporting bot to you via /tp command...");
+        const player = bot.players[username];
+        if (player?.entity?.position) {
+          bot.entity.position = player.entity.position.clone();
+        }
+        safeWhisper(username, "Teleporting bot to you!");
         return;
       }
       
-      // !come - WALKS to player (not teleport)
+      if (command === '!tp') {
+        const targetName = args[1];
+        if (!targetName) return safeWhisper(username, "Use: !tp [playername]");
+        const player = bot.players[targetName];
+        if (player?.entity?.position) {
+          bot.entity.position = player.entity.position.clone();
+          safeWhisper(username, `Teleported to ${targetName}!`);
+        } else {
+          bot.chat(`/tp ${bot.username} ${targetName}`);
+          safeWhisper(username, `Teleporting to ${targetName}...`);
+        }
+        return;
+      }
+      
+      if (command === '!call') {
+        const pos = bot.entity.position;
+        bot.chat(`/tp ${username} ${Math.round(pos.x)} ${Math.round(pos.y)} ${Math.round(pos.z)}`);
+        bot.chat(`/teleport ${username} ${Math.round(pos.x)} ${Math.round(pos.y)} ${Math.round(pos.z)}`);
+        safeWhisper(username, "Teleporting you to bot!");
+        return;
+      }
+      
       if (command === '!come') {
         followTarget = null; huntTarget = null; attackTarget = null;
         const target = bot.players[username]?.entity;
         if (!target) {
-          safeWhisper(username, "Can't see you. Try !tpbring to teleport bot to you.");
+          safeWhisper(username, "Can't see you. Try !tpbring to teleport.");
           return;
         }
         
         const distance = bot.entity.position.distanceTo(target.position);
         safeWhisper(username, `Walking to you! Distance: ${Math.round(distance)} blocks`);
         
-        // Walk to player
+        if (distance > 100) {
+          bot.entity.position = target.position.clone();
+          safeWhisper(username, "Too far, teleported!");
+          return;
+        }
+        
+        bot.setControlState('sprint', true);
         bot.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
         
-        // Anti-stuck while walking
         const walkInterval = setInterval(() => {
           const currentTarget = bot.players[username]?.entity;
           if (!currentTarget) {
             clearInterval(walkInterval);
+            bot.setControlState('sprint', false);
             return;
           }
+          
           const currentDistance = bot.entity.position.distanceTo(currentTarget.position);
+          
           if (currentDistance <= 2) {
             clearInterval(walkInterval);
+            bot.setControlState('sprint', false);
             bot.pathfinder.setGoal(null);
             bot.clearControlStates();
             safeWhisper(username, "Arrived!");
-          } else if (!bot.pathfinder.isMoving()) {
-            bot.setControlState('jump', true);
-            setTimeout(() => bot.setControlState('jump', false), 400);
-            // Update goal if player moved
-            bot.pathfinder.setGoal(new goals.GoalNear(currentTarget.position.x, currentTarget.position.y, currentTarget.position.z, 2), true);
+            return;
           }
-        }, 1000);
+          
+          bot.pathfinder.setGoal(new goals.GoalNear(currentTarget.position.x, currentTarget.position.y, currentTarget.position.z, 2), true);
+          
+          if (!bot.pathfinder.isMoving()) {
+            bot.setControlState('jump', true);
+            bot.setControlState('forward', true);
+            setTimeout(() => {
+              bot.setControlState('jump', false);
+              bot.setControlState('forward', false);
+            }, 400);
+          }
+          
+          const blockInFront = bot.blockAt(bot.entity.position.offset(0, 1, 0));
+          if (blockInFront && blockInFront.name !== 'air' && bot.canDigBlock(blockInFront)) {
+            bot.dig(blockInFront).catch(() => {});
+          }
+        }, 400);
         return;
       }
       
@@ -270,8 +364,12 @@ function createBot() {
         const block = bot.blockAtCursor(10);
         if (block && bot.canDigBlock(block)) {
           bot.lookAt(block.position);
-          bot.dig(block).catch(() => {});
-          safeWhisper(username, `Digging ${block.name}`);
+          bot.dig(block).then(() => {
+            safeWhisper(username, `Dug ${block.name}`);
+          }).catch(() => {
+            safeWhisper(username, "Dig failed, relogging...");
+            bot.end('Dig failed');
+          });
         } else {
           safeWhisper(username, "No block in view");
         }
@@ -407,7 +505,10 @@ function createBot() {
         const itemName = args.slice(1).join('_').toLowerCase();
         const item = bot.inventory.items().find(i => i.name.toLowerCase().includes(itemName));
         if (item) {
-          bot.equip(item, 'hand').then(() => safeWhisper(username, `Equipped ${item.name}`)).catch(() => {});
+          bot.equip(item, 'hand').then(() => safeWhisper(username, `Equipped ${item.name}`)).catch(() => {
+            safeWhisper(username, "Equip failed, relogging...");
+            bot.end('Equip failed');
+          });
         }
         return;
       }
@@ -441,7 +542,21 @@ function createBot() {
         const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
         if (!isNaN(x)) {
           followTarget = null;
+          bot.setControlState('sprint', true);
           bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
+          safeWhisper(username, `Sprinting to ${x}, ${y}, ${z}`);
+          
+          const gotoCheck = setInterval(() => {
+            const pos = bot.entity.position;
+            const dist = Math.sqrt((pos.x - x) ** 2 + (pos.z - z) ** 2);
+            if (dist <= 2) {
+              clearInterval(gotoCheck);
+              bot.setControlState('sprint', false);
+              bot.pathfinder.setGoal(null);
+              bot.clearControlStates();
+              safeWhisper(username, "Arrived at destination!");
+            }
+          }, 500);
         }
         return;
       }
@@ -553,16 +668,6 @@ function createBot() {
         if (freezeMode) { bot.pathfinder.setGoal(null); bot.clearControlStates(); }
         return;
       }
-      if (command === '!tp') {
-        const target = bot.players[args[1]]?.entity;
-        if (target) { bot.entity.position = target.position.clone(); }
-        return;
-      }
-      if (command === '!call') {
-        const pos = bot.entity.position;
-        bot.chat(`/tp ${username} ${Math.round(pos.x)} ${Math.round(pos.y)} ${Math.round(pos.z)}`);
-        return;
-      }
       if (command === '!activate') {
         const block = bot.blockAtCursor(5);
         if (block) bot.activateBlock(block);
@@ -575,8 +680,13 @@ function createBot() {
       if (command === '!sleeptest') { const bed = bot.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 16 }); if (bed) bot.sleep(bed).catch(() => {}); return; }
       
     } catch (e) {
-      safeWhisper(username, "Command is not working or is broken");
+      safeWhisper(username, "Command failed, relogging to try again...");
       addConsoleLog('Command error: ' + e.message);
+      lastCommand = message;
+      lastCommandUser = username;
+      setTimeout(() => {
+        bot.end('Command failed - relogging');
+      }, 500);
     }
   }
 
