@@ -420,7 +420,7 @@ function executeCommand(botInstance, username, args, command) {
       return;
     }
 
-    // !dig - FIXED: if no block name, target block at cursor and walk to it before digging
+    // !dig - if no block name, target block at cursor and walk to it before digging
     if (command === '!dig') {
       const blockName = args.slice(1).join('_');
       if (blockName) {
@@ -556,7 +556,7 @@ function createBot(botUsername) {
       defaultMove.canDig = true;
       defaultMove.allowParkour = true;
       defaultMove.allowSprinting = true;
-      defaultMove.allow1by1towers = true; // allow building up 1x1 pillars
+      defaultMove.allow1by1towers = true;
       bot.pathfinder.setMovements(defaultMove);
 
       bot.followTarget = null;
@@ -564,12 +564,72 @@ function createBot(botUsername) {
       bot.mineBlock = null;
       bot.digTarget = null;
       bot._activeGoalKey = null;
-      // Initialize spam intervals
       bot.spamLinkInterval = null;
       bot.spamTextInterval = null;
       bot.spamMsgInterval = null;
       let stuckTicks = 0;
       let lastActionTime = 0; // cooldown for stuck actions
+
+      // Helper function to handle stuck: build pillar, break block, or jump
+      function handleStuck(bot, targetY) {
+        const now = Date.now();
+        if (now - lastActionTime < 800) return;
+        lastActionTime = now;
+        stuckTicks = 0;
+
+        if (targetY > bot.entity.position.y + 1.5) {
+          buildPillar(bot);
+          return;
+        }
+        breakBlockInFront(bot);
+      }
+
+      function buildPillar(bot) {
+        const item = bot.inventory.items().find(i =>
+          i.name.includes('cobblestone') || i.name.includes('dirt') ||
+          i.name.includes('planks') || i.name.includes('stone') ||
+          i.name.includes('sand') || i.name.includes('gravel')
+        );
+        if (!item) {
+          bot.setControlState('jump', true);
+          setTimeout(() => bot.setControlState('jump', false), 300);
+          return;
+        }
+        bot.equip(item, 'hand')
+          .then(() => {
+            bot.setControlState('jump', true);
+            setTimeout(() => {
+              const blockBelow = bot.blockAt(bot.entity.position.offset(0, -2, 0));
+              const placePos = bot.entity.position.offset(0, -1, 0);
+              const blockAtPlace = bot.blockAt(placePos);
+              if (blockBelow && blockBelow.name !== 'air' && blockAtPlace && blockAtPlace.name === 'air') {
+                bot.placeBlock(blockBelow, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
+              }
+              bot.setControlState('jump', false);
+            }, 250);
+          })
+          .catch(() => {
+            bot.setControlState('jump', true);
+            setTimeout(() => bot.setControlState('jump', false), 300);
+          });
+      }
+
+      function breakBlockInFront(bot) {
+        const yaw = bot.entity.yaw;
+        const dx = -Math.sin(yaw);
+        const dz = -Math.cos(yaw);
+        for (let i = 1; i <= 3; i++) {
+          const checkPos = bot.entity.position.offset(dx * i, 1, dz * i);
+          const block = bot.blockAt(checkPos);
+          if (block && block.name !== 'air' && bot.canDigBlock(block) &&
+              bot.entity.position.distanceTo(block.position) <= 4) {
+            bot.dig(block).catch(() => {});
+            return;
+          }
+        }
+        bot.setControlState('jump', true);
+        setTimeout(() => bot.setControlState('jump', false), 300);
+      }
 
       bot.followInterval = setInterval(() => {
         if (bot.followTarget && bot.entity) {
@@ -580,83 +640,27 @@ function createBot(botUsername) {
 
           if (distance > 2) {
             if (bot._activeGoalKey !== goalKey) {
-              bot.setControlState('sprint', true);
               bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
               bot._activeGoalKey = goalKey;
               stuckTicks = 0;
             }
 
-            const isMoving = bot.pathfinder.isMoving();
-            const targetY = target.position.y;
-            const botY = bot.entity.position.y;
-
-            if (!isMoving) {
+            if (!bot.pathfinder.isMoving()) {
               stuckTicks++;
-              const now = Date.now();
-              if (now - lastActionTime > 800) {
-                lastActionTime = now;
-                stuckTicks = 0;
-
-                if (targetY > botY + 1.5) {
-                  // Build pillar
-                  const item = bot.inventory.items().find(i => 
-                    i.name.includes('cobblestone') || i.name.includes('dirt') || 
-                    i.name.includes('planks') || i.name.includes('stone') || 
-                    i.name.includes('sand') || i.name.includes('gravel')
-                  );
-                  if (item) {
-                    bot.equip(item, 'hand').then(() => {
-                      bot.setControlState('jump', true);
-                      setTimeout(() => {
-                        const refBlock = bot.blockAt(bot.entity.position.offset(0, -2, 0));
-                        const placePos = bot.entity.position.offset(0, -1, 0);
-                        const blockAtPlace = bot.blockAt(placePos);
-                        if (refBlock && refBlock.name !== 'air' && blockAtPlace && blockAtPlace.name === 'air') {
-                          bot.placeBlock(refBlock, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
-                        }
-                        bot.setControlState('jump', false);
-                      }, 200);
-                    }).catch(() => {});
-                  } else {
-                    bot.setControlState('jump', true);
-                    setTimeout(() => bot.setControlState('jump', false), 300);
-                  }
-                } else {
-                  // Try to break block in front (within 4 blocks) if not above target
-                  const yaw = bot.entity.yaw;
-                  const dx = -Math.sin(yaw);
-                  const dz = -Math.cos(yaw);
-                  // Check a few points in front (1,2,3 blocks ahead at head height)
-                  let broke = false;
-                  for (let i = 1; i <= 3; i++) {
-                    const checkPos = bot.entity.position.offset(dx * i, 1, dz * i);
-                    const block = bot.blockAt(checkPos);
-                    if (block && block.name !== 'air' && bot.canDigBlock(block) && bot.entity.position.distanceTo(block.position) <= 4) {
-                      bot.dig(block).catch(() => {});
-                      broke = true;
-                      break;
-                    }
-                  }
-                  if (!broke) {
-                    // Just jump
-                    bot.setControlState('jump', true);
-                    setTimeout(() => bot.setControlState('jump', false), 300);
-                  }
-                }
+              if (stuckTicks >= 2) {
+                handleStuck(bot, target.position.y);
               }
             } else {
               stuckTicks = 0;
             }
           } else {
             if (bot._activeGoalKey === goalKey) {
-              bot.setControlState('sprint', false);
               bot.pathfinder.setGoal(null);
               bot.clearControlStates();
               bot._activeGoalKey = null;
             }
           }
         } else if (bot._activeGoalKey?.startsWith('follow:')) {
-          bot.setControlState('sprint', false);
           bot.pathfinder.setGoal(null);
           bot.clearControlStates();
           bot._activeGoalKey = null;
@@ -672,7 +676,6 @@ function createBot(botUsername) {
 
           if (distance > 2) {
             if (bot._activeGoalKey !== goalKey) {
-              bot.setControlState('sprint', true);
               bot.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
               bot._activeGoalKey = goalKey;
               stuckTicks = 0;
@@ -680,22 +683,18 @@ function createBot(botUsername) {
             if (!bot.pathfinder.isMoving()) {
               stuckTicks++;
               if (stuckTicks >= 2) {
-                bot.setControlState('jump', true);
-                setTimeout(() => bot.setControlState('jump', false), 400);
-                stuckTicks = 0;
+                handleStuck(bot, target.position.y);
               }
             } else {
               stuckTicks = 0;
             }
           } else {
-            bot.setControlState('sprint', false);
             bot.pathfinder.setGoal(null);
             bot.clearControlStates();
             bot._activeGoalKey = null;
             bot.comingTo = null;
           }
         } else if (bot._activeGoalKey?.startsWith('come:')) {
-          bot.setControlState('sprint', false);
           bot.pathfinder.setGoal(null);
           bot.clearControlStates();
           bot._activeGoalKey = null;
@@ -802,7 +801,6 @@ function cleanupBot(bot) {
   clearInterval(bot.followInterval);
   clearInterval(bot.comeInterval);
   clearInterval(bot.mineInterval);
-  // Clear all spam intervals
   clearInterval(bot.spamLinkInterval);
   clearInterval(bot.spamTextInterval);
   clearInterval(bot.spamMsgInterval);
