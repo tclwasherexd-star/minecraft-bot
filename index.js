@@ -9,7 +9,8 @@ const config = {
   port: 50838, 
   version: '1.20.1', 
   auth: 'offline',
-  hideErrors: true
+  hideErrors: true,
+  checkTimeoutInterval: 120000
 };
 
 const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'];
@@ -28,7 +29,6 @@ let bots = {};
 let botStatus = {};
 let botPlaytime = {};
 let botJoinTime = {};
-let botsCreated = 0;
 let totalCommandsExecuted = 0;
 let commandHistory = [];
 let mcConsoleLogs = [];
@@ -231,19 +231,19 @@ const PORT = process.env.PORT || 3000;
 http.listen(PORT, '0.0.0.0', () => {
   console.log(`Website started on port ${PORT}`);
   global.startTime = Date.now();
-  createNextBot();
+  createAllBots();
 });
 
-function createNextBot() {
-  if (botsCreated >= NUMBER_OF_BOTS) return;
-  const botUsername = botNames[botsCreated];
-  botsCreated++;
-  createBot(botUsername);
-  setTimeout(createNextBot, 15000);
+function createAllBots() {
+  botNames.forEach((name, index) => {
+    setTimeout(() => {
+      createBot(name);
+    }, index * 5000);
+  });
 }
 
 function createBot(botUsername) {
-  if (bots[botUsername] && bots[botUsername].entity) return;
+  if (bots[botUsername] && bots[botUsername].entity && botStatus[botUsername] === 'online') return;
 
   const botConfig = { ...config, username: botUsername };
   let bot;
@@ -255,11 +255,13 @@ function createBot(botUsername) {
     botStatus[botUsername] = 'connecting';
     botPlaytime[botUsername] = botPlaytime[botUsername] || 0;
     consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} connecting...`);
+    if (consoleLogs.length > 100) consoleLogs.shift();
 
     bot.once('spawn', () => {
       botStatus[botUsername] = 'online';
       botJoinTime[botUsername] = Date.now();
       consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} joined!`);
+      if (consoleLogs.length > 100) consoleLogs.shift();
       
       bot.followTarget = null;
       bot.attackTarget = null;
@@ -291,16 +293,30 @@ function createBot(botUsername) {
       if (mcConsoleLogs.length > 50) mcConsoleLogs.shift();
     });
 
-    bot.on('error', () => {});
-    bot.on('kicked', () => { botStatus[botUsername] = 'kicked'; });
-    bot.on('end', () => { 
-      botStatus[botUsername] = 'offline'; 
-      setTimeout(() => createBot(botUsername), 15000); 
+    bot.on('error', () => {
+      consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} error`);
+      if (consoleLogs.length > 100) consoleLogs.shift();
+    });
+
+    bot.on('kicked', () => {
+      botStatus[botUsername] = 'kicked';
+      consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} kicked, reconnecting...`);
+      if (consoleLogs.length > 100) consoleLogs.shift();
+      setTimeout(() => createBot(botUsername), 5000);
+    });
+
+    bot.on('end', () => {
+      botStatus[botUsername] = 'offline';
+      consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} disconnected, reconnecting...`);
+      if (consoleLogs.length > 100) consoleLogs.shift();
+      setTimeout(() => createBot(botUsername), 5000);
     });
 
   } catch (e) {
     botStatus[botUsername] = 'error';
-    setTimeout(() => createBot(botUsername), 20000);
+    consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${botUsername} failed, retrying...`);
+    if (consoleLogs.length > 100) consoleLogs.shift();
+    setTimeout(() => createBot(botUsername), 5000);
   }
 
   bot.on('whisper', (username, message) => {
@@ -324,7 +340,6 @@ app.post('/api/mccommand', (req, res) => {
   const cmd = req.body.command;
   if (cmd) {
     Object.values(bots).forEach(b => { if (b && b.entity) b.chat(cmd); });
-    mcConsoleLogs.push(`[${new Date().toLocaleTimeString()}] > ${cmd}`);
   }
   res.redirect('/');
 });
@@ -376,53 +391,53 @@ app.get('/', (req, res) => {
       <div class="bots">${botCards}</div>
       
       <div class="command-list">
-        <h2>📋 All Commands (Scroll)</h2>
-        <div class="cmd">!come [bot] - TP to you (any distance)</div>
-        <div class="cmd">!tpbring [bot] - TP to you (any distance)</div>
-        <div class="cmd">!follow [player] [bot] - TP + follow (any distance)</div>
+        <h2>All Commands</h2>
+        <div class="cmd">!come [bot] - TP to you</div>
+        <div class="cmd">!tpbring [bot] - TP to you</div>
+        <div class="cmd">!follow [player] [bot] - TP + follow</div>
         <div class="cmd">!goto [x] [y] [z] [bot] - TP to coords</div>
         <div class="cmd">!attack [player] [bot] - TP + attack</div>
         <div class="cmd">!hunt [player] [bot] - TP + attack</div>
-        <div class="cmd">!line [bot] - Line up bots</div>
-        <div class="cmd">!talk [bot] [msg] - Say message</div>
-        <div class="cmd">!shout [bot] [msg] - Shout message</div>
+        <div class="cmd">!line [bot] - Line up</div>
+        <div class="cmd">!talk [bot] [msg] - Say</div>
+        <div class="cmd">!shout [bot] [msg] - Shout</div>
         <div class="cmd">!msg [bot] [player] [msg] - Whisper</div>
-        <div class="cmd">!echo [bot] [msg] - Echo message</div>
-        <div class="cmd">!stop [bot] - Stop all actions</div>
+        <div class="cmd">!echo [bot] [msg] - Echo</div>
+        <div class="cmd">!stop [bot] - Stop</div>
         <div class="cmd">!jump [bot] - Jump</div>
-        <div class="cmd">!killbot [bot] - Kill bot</div>
-        <div class="cmd">!coords [bot] - Show coords</div>
-        <div class="cmd">!status [bot] - Show HP</div>
-        <div class="cmd">!ping [bot] - Check ping</div>
-        <div class="cmd">!players [bot] - List players</div>
-        <div class="cmd">!survival [bot] - Survival mode</div>
-        <div class="cmd">!creative [bot] - Creative mode</div>
-        <div class="cmd">!mine [bot] [block] - Auto mine</div>
-        <div class="cmd">!stopmine [bot] - Stop mining</div>
-        <div class="cmd">!dig [bot] - Dig block</div>
-        <div class="cmd">!drop [bot] - Drop item</div>
+        <div class="cmd">!killbot [bot] - Kill</div>
+        <div class="cmd">!coords [bot] - Coords</div>
+        <div class="cmd">!status [bot] - HP</div>
+        <div class="cmd">!ping [bot] - Ping</div>
+        <div class="cmd">!players [bot] - Players</div>
+        <div class="cmd">!survival [bot] - Survival</div>
+        <div class="cmd">!creative [bot] - Creative</div>
+        <div class="cmd">!mine [bot] [block] - Mine</div>
+        <div class="cmd">!stopmine [bot] - Stop mine</div>
+        <div class="cmd">!dig [bot] - Dig</div>
+        <div class="cmd">!drop [bot] - Drop</div>
         <div class="cmd">!dropall [bot] - Drop all</div>
-        <div class="cmd">!equip [bot] [item] - Equip item</div>
+        <div class="cmd">!equip [bot] [item] - Equip</div>
         <div class="cmd">!sneak [bot] - Sneak</div>
-        <div class="cmd">!unsneak [bot] - Stand up</div>
-        <div class="cmd">!nearbyplayers [bot] - Nearby players</div>
-        <div class="cmd">!health [bot] [player] - Player HP</div>
-        <div class="cmd">!whereis [bot] [player] - Find player</div>
-        <div class="cmd">!exp [bot] - XP level</div>
-        <div class="cmd">!gamemode [bot] - Show gamemode</div>
-        <div class="cmd">!uptime [bot] - Bot uptime</div>
-        <div class="cmd">!kick [bot] [player] - Kick player</div>
+        <div class="cmd">!unsneak [bot] - Stand</div>
+        <div class="cmd">!nearbyplayers [bot] - Nearby</div>
+        <div class="cmd">!health [bot] [player] - HP</div>
+        <div class="cmd">!whereis [bot] [player] - Find</div>
+        <div class="cmd">!exp [bot] - XP</div>
+        <div class="cmd">!gamemode [bot] - Gamemode</div>
+        <div class="cmd">!uptime [bot] - Uptime</div>
+        <div class="cmd">!kick [bot] [player] - Kick</div>
       </div>
       
       <div class="console">
-        <h3>📋 Bot Console</h3>
-        ${commandHistory.slice(-15).map(l => `<div class="log" style="color:#4CAF50;">${l}</div>`).join('') || '<div class="log">No commands yet</div>'}
+        <h3>Bot Console</h3>
+        ${consoleLogs.slice(-15).map(l => `<div class="log" style="color:#4CAF50;">${l}</div>`).join('') || '<div class="log">No logs</div>'}
       </div>
       <form action="/api/botcommand" method="POST"><input type="text" name="command" placeholder="Bot command... !come all" required><button>Send</button></form>
       
       <div class="console">
-        <h3>🎮 Minecraft Console</h3>
-        ${mcConsoleLogs.slice(-15).map(l => `<div class="log">${l}</div>`).join('') || '<div class="log">No messages yet</div>'}
+        <h3>MC Console</h3>
+        ${mcConsoleLogs.slice(-15).map(l => `<div class="log">${l}</div>`).join('') || '<div class="log">No messages</div>'}
       </div>
       <form action="/api/mccommand" method="POST"><input type="text" name="command" placeholder="MC command... /time set day" required><button>Send</button></form>
     </body>
