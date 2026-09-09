@@ -19,7 +19,7 @@ const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 
-const NUMBER_OF_BOTS = 5; // Reduced to 5 for stability
+const NUMBER_OF_BOTS = 10; // Reduced to 5 for stability
 
 let bots = {};
 let consoleLogs = [];
