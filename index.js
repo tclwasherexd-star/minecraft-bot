@@ -9,27 +9,31 @@ const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 
-// Two bot configurations
-const botConfigs = [
-  { username: 'CloudAFK_Bot1', config },
-  { username: 'CloudAFK_Bot2', config }
-];
+// Generate bot configs - change 10 to 100 for 100 bots
+const NUMBER_OF_BOTS = 10;
+const botConfigs = [];
+for (let i = 1; i <= NUMBER_OF_BOTS; i++) {
+  botConfigs.push({ username: `CloudAFK_Bot${i}` });
+}
 
-let bots = {}; // Store multiple bots
+let bots = {};
 let consoleLogs = [];
 let mcConsoleLogs = [];
 let botStatus = {};
-let reconnectAttempts = {};
-let lastCommand = null;
-let lastCommandUser = null;
 
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('Website started on port ' + PORT);
-  // Create both bots
-  botConfigs.forEach(botConfig => createBot(botConfig.username));
+  console.log(`Website started on port ${PORT}`);
+  console.log(`Creating ${NUMBER_OF_BOTS} bots...`);
+  
+  // Create bots with delay to avoid rate limiting
+  botConfigs.forEach((botConfig, index) => {
+    setTimeout(() => {
+      createBot(botConfig.username);
+    }, index * 1000); // 1 second delay between each bot
+  });
 });
 
 function createBot(botUsername) {
@@ -39,12 +43,12 @@ function createBot(botUsername) {
   try {
     bot = mineflayer.createBot(botConfig);
     bot.loadPlugin(pathfinder);
+    bots[botUsername] = bot;
     botStatus[botUsername] = 'connecting';
     addConsoleLog(`${botUsername} connecting...`);
 
     bot.on('spawn', () => {
       botStatus[botUsername] = 'online';
-      reconnectAttempts[botUsername] = 0;
       addConsoleLog(`${botUsername} joined!`);
       
       const mcData = require('minecraft-data')(bot.version);
@@ -65,7 +69,6 @@ function createBot(botUsername) {
       bot.pathfinder.enablePathShortcuts = true;
       bot.pathfinder.thinkTimeout = 20;
 
-      // Store bot-specific variables
       bot.followTarget = null;
       bot.attackTarget = null;
       bot.huntTarget = null;
@@ -80,7 +83,6 @@ function createBot(botUsername) {
       bot.textSpamInterval = null;
       bot.spamPrivateInterval = null;
 
-      // Auto-mine loop for this bot
       setInterval(() => {
         if (bot.mineBlock && !bot.freezeMode) {
           const blocks = bot.findBlocks({
@@ -97,10 +99,9 @@ function createBot(botUsername) {
         }
       }, 200);
 
-      // Attack mobs loop
       setInterval(() => {
         if (bot.attackMobs && !bot.freezeMode) {
-          const target = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'monster' || e.type === 'hostile' || e.type === 'player') && e !== bot.entity);
+          const target = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'monster' || e.type === 'hostile') && e !== bot.entity);
           if (target && bot.entity.position.distanceTo(target.position) < 8) {
             bot.lookAt(target.position.offset(0, target.height, 0));
             bot.attack(target);
@@ -108,7 +109,6 @@ function createBot(botUsername) {
         }
       }, 300);
 
-      // Follow loop
       setInterval(() => {
         if (bot.followTarget && !bot.freezeMode) {
           const target = bot.players[bot.followTarget]?.entity;
@@ -141,33 +141,44 @@ function createBot(botUsername) {
         }
       }, 300);
 
-      // Stuck detector
-      let lastPos = null;
-      let stuckCount = 0;
-      
       setInterval(() => {
-        const pos = bot.entity.position;
-        if (lastPos && pos.distanceTo(lastPos) < 0.2 && bot.pathfinder.goal) {
-          stuckCount++;
-          
-          if (stuckCount === 2) {
-            bot.setControlState('jump', true);
-            setTimeout(() => bot.setControlState('jump', false), 400);
-          } else if (stuckCount === 4) {
-            bot.setControlState('forward', true);
-            setTimeout(() => bot.setControlState('forward', false), 800);
-          } else if (stuckCount >= 6) {
-            if (bot.followTarget && bot.players[bot.followTarget]?.entity) {
-              buildUp(bot);
+        if (bot.attackTarget && !bot.freezeMode) {
+          const target = bot.players[bot.attackTarget]?.entity;
+          if (target) {
+            bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+            if (bot.entity.position.distanceTo(target.position) < 3) {
+              bot.attack(target);
             }
-            bot.setControlState('jump', true);
-            setTimeout(() => bot.setControlState('jump', false), 800);
           }
-        } else {
-          stuckCount = 0;
         }
-        lastPos = pos.clone();
-      }, 400);
+      }, 300);
+
+      setInterval(() => {
+        if (bot.huntTarget && !bot.freezeMode) {
+          const target = bot.players[bot.huntTarget]?.entity;
+          if (target) {
+            const distance = bot.entity.position.distanceTo(target.position);
+            if (distance > 30) {
+              bot.entity.position = target.position.clone();
+            } else {
+              bot.pathfinder.setGoal(new goals.GoalFollow(target, 1), true);
+              if (distance < 3) {
+                bot.attack(target);
+              }
+            }
+          }
+        }
+      }, 300);
+
+      setInterval(() => {
+        if (bot.wanderMode && !bot.freezeMode && !bot.pathfinder.isMoving()) {
+          const radius = bot.wanderMode.radius || 10;
+          const origin = bot.wanderMode.origin;
+          const dx = (Math.random() * 2 - 1) * radius;
+          const dz = (Math.random() * 2 - 1) * radius;
+          bot.pathfinder.setGoal(new goals.GoalNear(origin.x + dx, origin.y, origin.z + dz, 1));
+        }
+      }, 5000);
     });
 
     bot.on('message', (jsonMsg) => {
@@ -187,9 +198,7 @@ function createBot(botUsername) {
     bot.on('end', (reason) => {
       botStatus[botUsername] = 'offline';
       addConsoleLog(`${botUsername} disconnected: ${reason}`);
-      reconnectAttempts[botUsername] = (reconnectAttempts[botUsername] || 0) + 1;
-      const delay = Math.min(2000 * reconnectAttempts[botUsername], 10000);
-      setTimeout(() => createBot(botUsername), delay);
+      setTimeout(() => createBot(botUsername), 5000);
     });
 
   } catch (e) {
@@ -200,13 +209,13 @@ function createBot(botUsername) {
   function addConsoleLog(message) {
     const log = `[${new Date().toLocaleTimeString()}] ${message}`;
     consoleLogs.push(log);
-    if (consoleLogs.length > 100) consoleLogs.shift();
+    if (consoleLogs.length > 200) consoleLogs.shift();
   }
 
   function addMCConsoleLog(message) {
     const log = `[${new Date().toLocaleTimeString()}] ${message}`;
     mcConsoleLogs.push(log);
-    if (mcConsoleLogs.length > 100) mcConsoleLogs.shift();
+    if (mcConsoleLogs.length > 200) mcConsoleLogs.shift();
   }
 
   function buildUp(botInstance) {
@@ -247,7 +256,14 @@ function createBot(botUsername) {
   function showCmdList(botInstance, username) {
     const lines = [
       `=== CLOUDAFK BOT (${botInstance.username}) ===`,
+      `Total Bots: ${NUMBER_OF_BOTS}`,
       "Owner: " + myUsername.join(', '),
+      "",
+      "Use: !command [botname] - Control specific bot",
+      "Use: !command all - Control all bots",
+      "Example: !come CloudAFK_Bot1",
+      "Example: !come all",
+      "Example: !talk hello all",
       "",
       "INFO: !coords !status !info !players !nearbyplayers !nearbymobs !health [p] !whereis [p] !leakcoords [p] !exp !gamemode !uptime",
       "",
@@ -261,11 +277,26 @@ function createBot(botUsername) {
       "",
       "INVENTORY: !drop !dropall !equip [item] !armor",
       "",
-      "FUN: !echo [msg] !ping !spin",
-      "",
-      "BOT CONTROL: !bot1 (control bot1) !bot2 (control bot2)"
+      "FUN: !echo [msg] !ping !spin"
     ];
     lines.forEach((line, i) => setTimeout(() => safeWhisper(botInstance, username, line), i * 75));
+  }
+
+  function getTargetBots(botArg) {
+    if (!botArg || botArg.toLowerCase() === 'all') {
+      return Object.values(bots).filter(b => b && botStatus[b.username] === 'online');
+    }
+    
+    const targetBot = bots[botArg];
+    if (targetBot && botStatus[botArg] === 'online') {
+      return [targetBot];
+    }
+    
+    const matchedBot = Object.values(bots).find(b => 
+      b && b.username.toLowerCase().includes(botArg.toLowerCase()) && botStatus[b.username] === 'online'
+    );
+    
+    return matchedBot ? [matchedBot] : [];
   }
 
   function handleCommand(username, message) {
@@ -276,344 +307,314 @@ function createBot(botUsername) {
 
     const args = message.trim().split(' ');
     const command = args[0]?.toLowerCase();
-
-    // Bot selection commands
-    if (command === '!bot1') {
-      // Switch active bot to bot1
-      activeBot = 'CloudAFK_Bot1';
-      safeWhisper(bot, username, "Now controlling Bot1!");
+    
+    let botArg = null;
+    const lastArg = args[args.length - 1];
+    const botNames = ['all', 'bot1', 'bot2', 'bot3', 'bot4', 'bot5', 'bot6', 'bot7', 'bot8', 'bot9', 'bot10'];
+    for (let i = 1; i <= NUMBER_OF_BOTS; i++) {
+      botNames.push(`cloudafk_bot${i}`);
+    }
+    
+    if (lastArg && botNames.includes(lastArg.toLowerCase())) {
+      botArg = lastArg;
+      args.pop();
+    }
+    
+    const targetBots = getTargetBots(botArg);
+    
+    if (targetBots.length === 0) {
+      safeWhisper(bot, username, "No bots online or bot not found.");
       return;
     }
-    if (command === '!bot2') {
-      activeBot = 'CloudAFK_Bot2';
-      safeWhisper(bot, username, "Now controlling Bot2!");
-      return;
-    }
 
-    // Determine which bot to control
-    let activeBotInstance = bot;
-    if (activeBot === 'CloudAFK_Bot2' && bots['CloudAFK_Bot2']) {
-      activeBotInstance = bots['CloudAFK_Bot2'];
-    }
+    targetBots.forEach(targetBot => {
+      executeCommand(targetBot, username, args, command);
+    });
+  }
 
+  function executeCommand(botInstance, username, args, command) {
+    const botName = botInstance.username;
+    
     try {
-      if (command === '!cmdlist' || command === '!help') { showCmdList(activeBotInstance, username); return; }
-      if (command === '!coords') { const p = activeBotInstance.entity.position; safeWhisper(activeBotInstance, username, `X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
-      if (command === '!status') { safeWhisper(activeBotInstance, username, `HP:${activeBotInstance.health}/20 Food:${activeBotInstance.food}/20`); return; }
-      if (command === '!players') { safeWhisper(activeBotInstance, username, `Online: ${Object.keys(activeBotInstance.players).join(', ')}`); return; }
-      if (command === '!jump') { activeBotInstance.setControlState('jump', true); setTimeout(() => activeBotInstance.setControlState('jump', false), 500); return; }
+      if (command === '!cmdlist' || command === '!help') { showCmdList(botInstance, username); return; }
+      if (command === '!coords') { const p = botInstance.entity.position; safeWhisper(botInstance, username, `${botName} X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
+      if (command === '!status') { safeWhisper(botInstance, username, `${botName} HP:${botInstance.health}/20 Food:${botInstance.food}/20`); return; }
+      if (command === '!players') { safeWhisper(botInstance, username, `${botName} Online: ${Object.keys(botInstance.players).join(', ')}`); return; }
+      if (command === '!jump') { botInstance.setControlState('jump', true); setTimeout(() => botInstance.setControlState('jump', false), 500); return; }
       
       if (command === '!stop') {
-        activeBotInstance.pathfinder.setGoal(null); activeBotInstance.clearControlStates();
-        activeBotInstance.followTarget = null; activeBotInstance.attackTarget = null; activeBotInstance.huntTarget = null;
-        activeBotInstance.protectMode = false; activeBotInstance.wanderMode = false; activeBotInstance.attackMobs = false; activeBotInstance.mineBlock = null;
-        if (activeBotInstance.textSpamInterval) { clearInterval(activeBotInstance.textSpamInterval); activeBotInstance.textSpamInterval = null; }
-        if (activeBotInstance.spamPrivateInterval) { clearInterval(activeBotInstance.spamPrivateInterval); activeBotInstance.spamPrivateInterval = null; }
-        safeWhisper(activeBotInstance, username, "Stopped all.");
+        botInstance.pathfinder.setGoal(null); botInstance.clearControlStates();
+        botInstance.followTarget = null; botInstance.attackTarget = null; botInstance.huntTarget = null;
+        botInstance.protectMode = false; botInstance.wanderMode = false; botInstance.attackMobs = false; botInstance.mineBlock = null;
+        if (botInstance.textSpamInterval) { clearInterval(botInstance.textSpamInterval); botInstance.textSpamInterval = null; }
+        if (botInstance.spamPrivateInterval) { clearInterval(botInstance.spamPrivateInterval); botInstance.spamPrivateInterval = null; }
         return;
       }
       
-      if (command === '!killbot') { activeBotInstance.chat('/kill'); safeWhisper(activeBotInstance, username, "Killing bot!"); return; }
-      
+      if (command === '!killbot') { botInstance.chat('/kill'); return; }
       if (command === '!tpbring') {
-        activeBotInstance.chat(`/tp ${activeBotInstance.username} ${username}`);
-        const player = activeBotInstance.players[username];
-        if (player?.entity?.position) {
-          activeBotInstance.entity.position = player.entity.position.clone();
-        }
-        safeWhisper(activeBotInstance, username, "Teleporting bot to you!");
+        botInstance.chat(`/tp ${botInstance.username} ${username}`);
+        const player = botInstance.players[username];
+        if (player?.entity?.position) botInstance.entity.position = player.entity.position.clone();
         return;
       }
-      
       if (command === '!tp') {
-        const targetName = args[1];
-        if (!targetName) return safeWhisper(activeBotInstance, username, "Use: !tp [playername]");
-        const player = activeBotInstance.players[targetName];
-        if (player?.entity?.position) {
-          activeBotInstance.entity.position = player.entity.position.clone();
-          safeWhisper(activeBotInstance, username, `Teleported to ${targetName}!`);
-        } else {
-          activeBotInstance.chat(`/tp ${activeBotInstance.username} ${targetName}`);
-          safeWhisper(activeBotInstance, username, `Teleporting to ${targetName}...`);
-        }
+        const target = botInstance.players[args[1]]?.entity;
+        if (target) botInstance.entity.position = target.position.clone();
         return;
       }
-      
       if (command === '!call') {
-        const pos = activeBotInstance.entity.position;
-        activeBotInstance.chat(`/tp ${username} ${Math.round(pos.x)} ${Math.round(pos.y)} ${Math.round(pos.z)}`);
-        safeWhisper(activeBotInstance, username, "Teleporting you to bot!");
+        const pos = botInstance.entity.position;
+        botInstance.chat(`/tp ${username} ${Math.round(pos.x)} ${Math.round(pos.y)} ${Math.round(pos.z)}`);
         return;
       }
-      
       if (command === '!come') {
-        activeBotInstance.followTarget = null; activeBotInstance.huntTarget = null;
-        const target = activeBotInstance.players[username]?.entity;
-        if (!target) {
-          safeWhisper(activeBotInstance, username, "Can't see you. Try !tpbring to teleport.");
-          return;
-        }
+        botInstance.followTarget = null; botInstance.huntTarget = null; botInstance.attackTarget = null;
+        const target = botInstance.players[username]?.entity;
+        if (!target) return;
         
-        const distance = activeBotInstance.entity.position.distanceTo(target.position);
-        safeWhisper(activeBotInstance, username, `Walking to you! Distance: ${Math.round(distance)} blocks`);
+        const distance = botInstance.entity.position.distanceTo(target.position);
         
         if (distance > 100) {
-          activeBotInstance.entity.position = target.position.clone();
-          safeWhisper(activeBotInstance, username, "Too far, teleported!");
+          botInstance.entity.position = target.position.clone();
           return;
         }
         
-        activeBotInstance.setControlState('sprint', true);
-        activeBotInstance.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
+        botInstance.setControlState('sprint', true);
+        botInstance.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
         
         const walkInterval = setInterval(() => {
-          const currentTarget = activeBotInstance.players[username]?.entity;
-          if (!currentTarget) {
-            clearInterval(walkInterval);
-            activeBotInstance.setControlState('sprint', false);
-            return;
-          }
+          const currentTarget = botInstance.players[username]?.entity;
+          if (!currentTarget) { clearInterval(walkInterval); botInstance.setControlState('sprint', false); return; }
           
-          const currentDistance = activeBotInstance.entity.position.distanceTo(currentTarget.position);
-          const heightDiff = currentTarget.position.y - activeBotInstance.entity.position.y;
+          const currentDistance = botInstance.entity.position.distanceTo(currentTarget.position);
+          const heightDiff = currentTarget.position.y - botInstance.entity.position.y;
           
           if (currentDistance <= 2 && Math.abs(heightDiff) <= 1) {
             clearInterval(walkInterval);
-            activeBotInstance.setControlState('sprint', false);
-            activeBotInstance.pathfinder.setGoal(null);
-            activeBotInstance.clearControlStates();
-            safeWhisper(activeBotInstance, username, "Arrived!");
+            botInstance.setControlState('sprint', false);
+            botInstance.pathfinder.setGoal(null);
+            botInstance.clearControlStates();
             return;
           }
           
-          if (heightDiff > 2) {
-            buildUp(activeBotInstance);
-          }
+          if (heightDiff > 2) buildUp(botInstance);
           
-          activeBotInstance.pathfinder.setGoal(new goals.GoalNear(currentTarget.position.x, currentTarget.position.y, currentTarget.position.z, 2), true);
+          botInstance.pathfinder.setGoal(new goals.GoalNear(currentTarget.position.x, currentTarget.position.y, currentTarget.position.z, 2), true);
           
-          if (!activeBotInstance.pathfinder.isMoving()) {
-            activeBotInstance.setControlState('jump', true);
-            activeBotInstance.setControlState('forward', true);
+          if (!botInstance.pathfinder.isMoving()) {
+            botInstance.setControlState('jump', true);
+            botInstance.setControlState('forward', true);
             setTimeout(() => {
-              activeBotInstance.setControlState('jump', false);
-              activeBotInstance.setControlState('forward', false);
+              botInstance.setControlState('jump', false);
+              botInstance.setControlState('forward', false);
             }, 400);
           }
         }, 400);
         return;
       }
-      
       if (command === '!follow') {
         const targetName = args[1] || username;
-        if (activeBotInstance.players[targetName]) {
-          activeBotInstance.followTarget = targetName;
-          safeWhisper(activeBotInstance, username, `Following ${targetName}!`);
-        }
+        if (botInstance.players[targetName]) botInstance.followTarget = targetName;
         return;
       }
-      
       if (command === '!goto') {
         const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
         if (!isNaN(x)) {
-          activeBotInstance.followTarget = null;
-          activeBotInstance.setControlState('sprint', true);
-          activeBotInstance.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
-          safeWhisper(activeBotInstance, username, `Going to ${x}, ${y}, ${z}`);
+          botInstance.followTarget = null;
+          botInstance.setControlState('sprint', true);
+          botInstance.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
         }
         return;
       }
-      
       if (command === '!dig') {
-        const block = activeBotInstance.blockAtCursor(10);
-        if (block && activeBotInstance.canDigBlock(block)) {
-          activeBotInstance.lookAt(block.position);
-          activeBotInstance.dig(block).catch(() => {});
-          safeWhisper(activeBotInstance, username, `Digging ${block.name}`);
+        const block = botInstance.blockAtCursor(10);
+        if (block && botInstance.canDigBlock(block)) {
+          botInstance.lookAt(block.position);
+          botInstance.dig(block).catch(() => {});
         }
         return;
       }
-      
       if (command === '!mine') {
-        if (args[1] === 'stop') {
-          activeBotInstance.mineBlock = null;
-        } else if (args[1]) {
-          activeBotInstance.mineBlock = args.slice(1).join('_');
-          safeWhisper(activeBotInstance, username, `Mining ${activeBotInstance.mineBlock}!`);
-        }
+        if (args[1] === 'stop') { botInstance.mineBlock = null; }
+        else if (args[1]) { botInstance.mineBlock = args.slice(1).join('_'); }
         return;
       }
-      
-      if (command === '!stopmine') { activeBotInstance.mineBlock = null; return; }
-      
+      if (command === '!stopmine') { botInstance.mineBlock = null; return; }
       if (command === '!attack') {
-        if (args[1] && activeBotInstance.players[args[1]]) {
-          activeBotInstance.attackTarget = args[1];
-          activeBotInstance.followTarget = null;
-          safeWhisper(activeBotInstance, username, `Attacking ${args[1]}!`);
+        if (args[1] && botInstance.players[args[1]]) {
+          botInstance.attackTarget = args[1];
+          botInstance.followTarget = null;
         }
         return;
       }
-      
       if (command === '!hunt') {
-        if (args[1] && activeBotInstance.players[args[1]]) {
-          activeBotInstance.huntTarget = args[1];
-          safeWhisper(activeBotInstance, username, `Hunting ${args[1]}!`);
+        if (args[1] && botInstance.players[args[1]]) {
+          botInstance.huntTarget = args[1];
         }
         return;
       }
-      
-      if (command === '!attackmobs') { activeBotInstance.attackMobs = !activeBotInstance.attackMobs; return; }
-      if (command === '!protect') { activeBotInstance.protectMode = !activeBotInstance.protectMode; return; }
-      if (command === '!kick') { if (args[1]) activeBotInstance.chat('/kick ' + args[1]); return; }
-      if (command === '!survival' || command === '!survial') { activeBotInstance.chat('/gamemode survival'); return; }
-      if (command === '!creative') { activeBotInstance.chat('/gamemode creative'); return; }
-      if (command === '!msg') { if (args[1] && args[2]) safeWhisper(activeBotInstance, args[1], args.slice(2).join(' ')); return; }
-      if (command === '!talk') { if (args[1]) activeBotInstance.chat(args.slice(1).join(' ')); return; }
-      if (command === '!shout') { if (args[1]) activeBotInstance.chat(args.slice(1).join(' ').toUpperCase() + '!!!'); return; }
-      if (command === '!skydrivebot') { activeBotInstance.chat('/effect give ' + activeBotInstance.username + ' minecraft:levitation 10 100'); return; }
+      if (command === '!attackmobs') { botInstance.attackMobs = !botInstance.attackMobs; return; }
+      if (command === '!protect') { botInstance.protectMode = !botInstance.protectMode; return; }
+      if (command === '!kick') { if (args[1]) botInstance.chat('/kick ' + args[1]); return; }
+      if (command === '!survival' || command === '!survial') { botInstance.chat('/gamemode survival'); return; }
+      if (command === '!creative') { botInstance.chat('/gamemode creative'); return; }
+      if (command === '!msg') { if (args[1] && args[2]) safeWhisper(botInstance, args[1], args.slice(2).join(' ')); return; }
+      if (command === '!talk') { if (args[1]) botInstance.chat(args.slice(1).join(' ')); return; }
+      if (command === '!shout') { if (args[1]) botInstance.chat(args.slice(1).join(' ').toUpperCase() + '!!!'); return; }
+      if (command === '!skydrivebot') { botInstance.chat('/effect give ' + botInstance.username + ' minecraft:levitation 10 100'); return; }
       if (command === '!skydriveplayers') {
         const targetName = args[1];
         if (targetName) {
-          activeBotInstance.chat('/effect give ' + targetName + ' minecraft:levitation 10 100');
+          botInstance.chat('/effect give ' + targetName + ' minecraft:levitation 10 100');
         } else {
-          Object.keys(activeBotInstance.players).forEach(p => {
-            if (p !== activeBotInstance.username) activeBotInstance.chat('/effect give ' + p + ' minecraft:levitation 10 100');
+          Object.keys(botInstance.players).forEach(p => {
+            if (p !== botInstance.username) botInstance.chat('/effect give ' + p + ' minecraft:levitation 10 100');
           });
         }
         return;
       }
-      if (command === '!healthgen') { activeBotInstance.chat('/effect give ' + activeBotInstance.username + ' minecraft:instant_health 1 255'); return; }
+      if (command === '!healthgen') { botInstance.chat('/effect give ' + botInstance.username + ' minecraft:instant_health 1 255'); return; }
       if (command === '!tntrain') {
-        const target = activeBotInstance.players[args[1]]?.entity;
+        const target = botInstance.players[args[1]]?.entity;
         if (target) {
           let count = 0;
           const tntInterval = setInterval(() => {
             if (count >= 100) { clearInterval(tntInterval); return; }
-            activeBotInstance.chat(`/summon tnt ${Math.round(target.position.x)} ${Math.round(target.position.y + 15)} ${Math.round(target.position.z)}`);
+            botInstance.chat(`/summon tnt ${Math.round(target.position.x)} ${Math.round(target.position.y + 15)} ${Math.round(target.position.z)}`);
             count++;
           }, 50);
         }
         return;
       }
-      if (command === '!stopserver') { activeBotInstance.chat('/stop'); return; }
+      if (command === '!stopserver') { botInstance.chat('/stop'); return; }
       if (command === '!leakcoords') {
-        const target = activeBotInstance.players[args[1]]?.entity;
-        if (target) activeBotInstance.chat(`${args[1]}: X:${Math.round(target.position.x)} Y:${Math.round(target.position.y)} Z:${Math.round(target.position.z)}`);
+        const target = botInstance.players[args[1]]?.entity;
+        if (target) botInstance.chat(`${args[1]}: X:${Math.round(target.position.x)} Y:${Math.round(target.position.y)} Z:${Math.round(target.position.z)}`);
         return;
       }
       if (command === '!armor') {
-        const armor = activeBotInstance.inventory.items().filter(i => i.name.includes('helmet') || i.name.includes('chestplate') || i.name.includes('leggings') || i.name.includes('boots'));
+        const armor = botInstance.inventory.items().filter(i => i.name.includes('helmet') || i.name.includes('chestplate') || i.name.includes('leggings') || i.name.includes('boots'));
         armor.forEach(item => {
           try {
-            if (item.name.includes('helmet')) activeBotInstance.equip(item, 'head');
-            if (item.name.includes('chestplate')) activeBotInstance.equip(item, 'torso');
-            if (item.name.includes('leggings')) activeBotInstance.equip(item, 'legs');
-            if (item.name.includes('boots')) activeBotInstance.equip(item, 'feet');
+            if (item.name.includes('helmet')) botInstance.equip(item, 'head');
+            if (item.name.includes('chestplate')) botInstance.equip(item, 'torso');
+            if (item.name.includes('leggings')) botInstance.equip(item, 'legs');
+            if (item.name.includes('boots')) botInstance.equip(item, 'feet');
           } catch (e) {}
         });
         return;
       }
       if (command === '!attachplayer') {
-        if (args[1] && activeBotInstance.players[args[1]]) {
-          activeBotInstance.attachTarget = args[1];
-          activeBotInstance.attackTarget = args[1];
+        if (args[1] && botInstance.players[args[1]]) {
+          botInstance.attachTarget = args[1];
+          botInstance.attackTarget = args[1];
         }
         return;
       }
       if (command === '!attachmob') {
-        const mob = activeBotInstance.nearestEntity(e => e.type === 'mob' || e.type === 'monster');
-        if (mob) activeBotInstance.attachTarget = mob.id;
+        const mob = botInstance.nearestEntity(e => e.type === 'mob' || e.type === 'monster');
+        if (mob) botInstance.attachTarget = mob.id;
         return;
       }
-      if (command === '!drop') { const h = activeBotInstance.heldItem; if (h) activeBotInstance.tossStack(h); return; }
-      if (command === '!dropall') { activeBotInstance.inventory.items().forEach(i => activeBotInstance.tossStack(i).catch(() => {})); return; }
+      if (command === '!drop') { const h = botInstance.heldItem; if (h) botInstance.tossStack(h); return; }
+      if (command === '!dropall') { botInstance.inventory.items().forEach(i => botInstance.tossStack(i).catch(() => {})); return; }
       if (command === '!equip') {
-        const item = activeBotInstance.inventory.items().find(i => i.name.includes(args.slice(1).join('_')));
-        if (item) activeBotInstance.equip(item, 'hand').catch(() => {});
+        const item = botInstance.inventory.items().find(i => i.name.includes(args.slice(1).join('_')));
+        if (item) botInstance.equip(item, 'hand').catch(() => {});
         return;
       }
       if (command === '!place') {
-        const item = activeBotInstance.inventory.items().find(i => i.name.includes(args.slice(1).join('_')));
-        const ref = activeBotInstance.blockAtCursor(5);
-        if (item && ref) activeBotInstance.equip(item, 'hand').then(() => activeBotInstance.placeBlock(ref, {x:0,y:1,z:0})).catch(() => {});
+        const item = botInstance.inventory.items().find(i => i.name.includes(args.slice(1).join('_')));
+        const ref = botInstance.blockAtCursor(5);
+        if (item && ref) botInstance.equip(item, 'hand').then(() => botInstance.placeBlock(ref, {x:0,y:1,z:0})).catch(() => {});
         return;
       }
       if (command === '!collect') {
-        const targets = activeBotInstance.findBlocks({ matching: b => b.name.includes(args[1] || ''), maxDistance: 32, count: parseInt(args[2]) || 1 });
+        const targets = botInstance.findBlocks({ matching: b => b.name.includes(args[1] || ''), maxDistance: 32, count: parseInt(args[2]) || 1 });
         targets.forEach(pos => {
-          const block = activeBotInstance.blockAt(pos);
-          if (block && activeBotInstance.canDigBlock(block)) activeBotInstance.dig(block).catch(() => {});
+          const block = botInstance.blockAt(pos);
+          if (block && botInstance.canDigBlock(block)) botInstance.dig(block).catch(() => {});
         });
         return;
       }
-      if (command === '!blockinfo') { const b = activeBotInstance.blockAtCursor(5); if (b) safeWhisper(activeBotInstance, username, `Block: ${b.name}`); return; }
+      if (command === '!blockinfo') { const b = botInstance.blockAtCursor(5); if (b) safeWhisper(botInstance, username, `Block: ${b.name}`); return; }
       if (command === '!nearbyplayers') {
-        const list = Object.values(activeBotInstance.players).filter(p => p.entity && p.username !== activeBotInstance.username).map(p => p.username);
-        safeWhisper(activeBotInstance, username, list.length ? `Nearby: ${list.join(', ')}` : "No players");
+        const list = Object.values(botInstance.players).filter(p => p.entity && p.username !== botInstance.username).map(p => p.username);
+        safeWhisper(botInstance, username, list.length ? `Nearby: ${list.join(', ')}` : "No players");
         return;
       }
       if (command === '!nearbymobs') {
-        const mobs = Object.values(activeBotInstance.entities).filter(e => e.type === 'mob' && e !== activeBotInstance.entity).map(e => e.name || 'mob');
-        safeWhisper(activeBotInstance, username, mobs.length ? `Mobs: ${mobs.join(', ')}` : "No mobs");
+        const mobs = Object.values(botInstance.entities).filter(e => e.type === 'mob' && e !== botInstance.entity).map(e => e.name || 'mob');
+        safeWhisper(botInstance, username, mobs.length ? `Mobs: ${mobs.join(', ')}` : "No mobs");
         return;
       }
       if (command === '!health') {
-        const target = activeBotInstance.players[args[1]]?.entity || activeBotInstance.players[username]?.entity;
-        if (target) safeWhisper(activeBotInstance, username, `HP: ${target.health || 'unknown'}`);
+        const target = botInstance.players[args[1]]?.entity || botInstance.players[username]?.entity;
+        if (target) safeWhisper(botInstance, username, `HP: ${target.health || 'unknown'}`);
         return;
       }
       if (command === '!whereis') {
-        const target = activeBotInstance.players[args[1]]?.entity;
-        if (target) safeWhisper(activeBotInstance, username, `${args[1]}: X:${Math.round(target.position.x)} Y:${Math.round(target.position.y)} Z:${Math.round(target.position.z)}`);
+        const target = botInstance.players[args[1]]?.entity;
+        if (target) safeWhisper(botInstance, username, `${args[1]}: X:${Math.round(target.position.x)} Y:${Math.round(target.position.y)} Z:${Math.round(target.position.z)}`);
         return;
       }
-      if (command === '!exp') { safeWhisper(activeBotInstance, username, `XP: ${activeBotInstance.experience.level}`); return; }
-      if (command === '!gamemode') { safeWhisper(activeBotInstance, username, `Gamemode: ${activeBotInstance.game.gameMode}`); return; }
-      if (command === '!uptime') { safeWhisper(activeBotInstance, username, `Uptime: ${fmtTime(Date.now() - spawnTime)}`); return; }
-      if (command === '!echo') { safeWhisper(activeBotInstance, username, args.slice(1).join(' ')); return; }
-      if (command === '!ping') { safeWhisper(activeBotInstance, username, `Ping: ${activeBotInstance.player?.ping || 'unknown'}ms`); return; }
+      if (command === '!exp') { safeWhisper(botInstance, username, `XP: ${botInstance.experience.level}`); return; }
+      if (command === '!gamemode') { safeWhisper(botInstance, username, `Gamemode: ${botInstance.game.gameMode}`); return; }
+      if (command === '!uptime') { safeWhisper(botInstance, username, `Uptime: ${fmtTime(Date.now() - spawnTime)}`); return; }
+      if (command === '!echo') { safeWhisper(botInstance, username, args.slice(1).join(' ')); return; }
+      if (command === '!ping') { safeWhisper(botInstance, username, `Ping: ${botInstance.player?.ping || 'unknown'}ms`); return; }
       if (command === '!spin') {
-        let yaw = activeBotInstance.entity.yaw;
+        let yaw = botInstance.entity.yaw;
         const interval = setInterval(() => {
           yaw += Math.PI / 4;
-          activeBotInstance.look(yaw, activeBotInstance.entity.pitch, true);
-          if (yaw >= activeBotInstance.entity.yaw + Math.PI * 2) clearInterval(interval);
+          botInstance.look(yaw, botInstance.entity.pitch, true);
+          if (yaw >= botInstance.entity.yaw + Math.PI * 2) clearInterval(interval);
         }, 100);
         return;
       }
       if (command === '!freeze') {
-        activeBotInstance.freezeMode = !activeBotInstance.freezeMode;
-        if (activeBotInstance.freezeMode) { activeBotInstance.pathfinder.setGoal(null); activeBotInstance.clearControlStates(); }
+        botInstance.freezeMode = !botInstance.freezeMode;
+        if (botInstance.freezeMode) { botInstance.pathfinder.setGoal(null); botInstance.clearControlStates(); }
         return;
       }
-      if (command === '!activate') {
-        const block = activeBotInstance.blockAtCursor(5);
-        if (block) activeBotInstance.activateBlock(block);
-        return;
-      }
-      if (command === '!break') {
-        if (args[1] === 'stop') { activeBotInstance.autoBreakBlock = null; } else { activeBotInstance.autoBreakBlock = args.slice(1).join('_'); }
-        return;
-      }
-      if (command === '!sleeptest') { const bed = activeBotInstance.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 16 }); if (bed) activeBotInstance.sleep(bed).catch(() => {}); return; }
+      if (command === '!activate') { const block = botInstance.blockAtCursor(5); if (block) botInstance.activateBlock(block); return; }
+      if (command === '!break') { if (args[1] === 'stop') { botInstance.autoBreakBlock = null; } else { botInstance.autoBreakBlock = args.slice(1).join('_'); } return; }
+      if (command === '!sleeptest') { const bed = botInstance.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 16 }); if (bed) botInstance.sleep(bed).catch(() => {}); return; }
       if (command === '!textspam') {
         const targetName = args[1];
         const text = args.slice(2).join(' ');
-        if (activeBotInstance.textSpamInterval) { clearInterval(activeBotInstance.textSpamInterval); activeBotInstance.textSpamInterval = null; }
-        if (targetName && text) {
-          activeBotInstance.textSpamInterval = setInterval(() => safeWhisper(activeBotInstance, targetName, text), 1000);
-        }
+        if (botInstance.textSpamInterval) { clearInterval(botInstance.textSpamInterval); botInstance.textSpamInterval = null; }
+        if (targetName && text) botInstance.textSpamInterval = setInterval(() => safeWhisper(botInstance, targetName, text), 1000);
         return;
       }
       if (command === '!stoptextspam') {
-        if (activeBotInstance.textSpamInterval) { clearInterval(activeBotInstance.textSpamInterval); activeBotInstance.textSpamInterval = null; }
-        if (activeBotInstance.spamPrivateInterval) { clearInterval(activeBotInstance.spamPrivateInterval); activeBotInstance.spamPrivateInterval = null; }
+        if (botInstance.textSpamInterval) { clearInterval(botInstance.textSpamInterval); botInstance.textSpamInterval = null; }
+        if (botInstance.spamPrivateInterval) { clearInterval(botInstance.spamPrivateInterval); botInstance.spamPrivateInterval = null; }
+        return;
+      }
+      if (command === '!unsneak') { botInstance.setControlState('sneak', false); return; }
+      if (command === '!sneak') { botInstance.setControlState('sneak', true); return; }
+      if (command === '!lookatfollow') {
+        const targetName = args[1] || username;
+        const target = botInstance.players[targetName]?.entity;
+        if (target) { botInstance.followTarget = targetName; botInstance.lookAt(target.position.offset(0, target.height, 0)); }
+        return;
+      }
+      if (command === '!wander') { botInstance.wanderMode = { radius: parseInt(args[1]) || 10, origin: botInstance.entity.position.clone() }; return; }
+      if (command === '!stopwander') { botInstance.wanderMode = false; botInstance.pathfinder.setGoal(null); return; }
+      if (command === '!flee') {
+        const distance = parseInt(args[1]) || 20;
+        const hostile = botInstance.nearestEntity(e => e.type === 'hostile' || e.type === 'monster');
+        if (hostile) {
+          const away = botInstance.entity.position.minus(hostile.position).normalize().scale(distance).plus(botInstance.entity.position);
+          botInstance.pathfinder.setGoal(new goals.GoalNear(away.x, away.y, away.z, 1), true);
+        }
         return;
       }
       
     } catch (e) {
-      safeWhisper(bot, username, "Command failed: " + e.message);
+      // Silently fail for multi-bot
     }
   }
 
@@ -623,11 +624,9 @@ function createBot(botUsername) {
   });
 }
 
-let activeBot = 'CloudAFK_Bot1'; // Default active bot
-
 // Website
 app.get('/', (req, res) => {
-  let botStatuses = Object.keys(botStatus).map(name => `${name}: ${botStatus[name]}`).join('<br>');
+  const onlineCount = Object.values(botStatus).filter(s => s === 'online').length;
   
   res.send(`
     <!DOCTYPE html>
@@ -639,14 +638,14 @@ app.get('/', (req, res) => {
         body { font-family: Arial; background: #1a1a2e; color: white; padding: 20px; }
         h1 { color: #4CAF50; text-align: center; }
         .card { background: #16213e; padding: 20px; border-radius: 10px; text-align: center; margin: 10px 0; }
-        .value { font-size: 1.5em; color: #4CAF50; font-weight: bold; }
+        .value { font-size: 2em; color: #4CAF50; font-weight: bold; }
         .console { background: #0f3460; padding: 15px; border-radius: 10px; height: 200px; overflow-y: auto; margin: 10px 0; }
         .log { font-family: monospace; font-size: 12px; }
       </style>
     </head>
     <body>
       <h1>CloudAFK Bots Dashboard</h1>
-      <div class="card"><h3>Bot Status</h3><div class="value">${botStatuses}</div></div>
+      <div class="card"><h3>Bots Online</h3><div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div></div>
       <div class="console"><h3>Bot Console</h3>${consoleLogs.slice(-20).map(l => `<div class="log">${l}</div>`).join('')}</div>
       <div class="console"><h3>MC Console</h3>${mcConsoleLogs.slice(-20).map(l => `<div class="log">${l}</div>`).join('')}</div>
     </body>
