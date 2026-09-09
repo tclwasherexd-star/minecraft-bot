@@ -424,13 +424,11 @@ function executeCommand(botInstance, username, args, command) {
     if (command === '!dig') {
       const blockName = args.slice(1).join('_');
       if (blockName) {
-        // Start mining that block type (general mining)
         clearMovement(botInstance);
         botInstance.mineBlock = blockName;
         botInstance.digTarget = null;
         safeWhisper(botInstance, username, `${botName} now digging ${blockName.replace(/_/g, ' ')}`);
       } else {
-        // Specific block at cursor - pathfind to it then dig
         const block = botInstance.blockAtCursor(10);
         if (!block) {
           safeWhisper(botInstance, username, `${botName} no block in sight.`);
@@ -439,7 +437,6 @@ function executeCommand(botInstance, username, args, command) {
         clearMovement(botInstance);
         botInstance.mineBlock = null;
         botInstance.digTarget = block.position.clone();
-        // Set pathfinder goal to the block
         botInstance.pathfinder.setGoal(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 1), true);
         botInstance._activeGoalKey = `digTarget:${block.position.x},${block.position.y},${block.position.z}`;
         safeWhisper(botInstance, username, `${botName} moving to dig block.`);
@@ -559,12 +556,13 @@ function createBot(botUsername) {
       defaultMove.canDig = true;
       defaultMove.allowParkour = true;
       defaultMove.allowSprinting = true;
+      defaultMove.allow1by1towers = true; // allow building up 1x1 pillars
       bot.pathfinder.setMovements(defaultMove);
 
       bot.followTarget = null;
       bot.comingTo = null;
       bot.mineBlock = null;
-      bot.digTarget = null; // specific block target
+      bot.digTarget = null;
       bot._activeGoalKey = null;
       // Initialize spam intervals
       bot.spamLinkInterval = null;
@@ -579,18 +577,48 @@ function createBot(botUsername) {
           const distance = bot.entity.position.distanceTo(target.position);
           const goalKey = `follow:${bot.followTarget}`;
 
-          if (distance > 3) {
+          if (distance > 2) {
             if (bot._activeGoalKey !== goalKey) {
               bot.setControlState('sprint', true);
               bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
               bot._activeGoalKey = goalKey;
               stuckTicks = 0;
             }
+
+            // Improved vertical following: if target is above and bot is stuck, build or jump
             if (!bot.pathfinder.isMoving()) {
               stuckTicks++;
-              if (stuckTicks >= 2) {
+              const targetY = target.position.y;
+              const botY = bot.entity.position.y;
+
+              // If target is more than 1 block above, attempt pillar building immediately
+              if (targetY > botY + 1) {
+                // Try to place a block beneath us and jump
+                const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+                // We need a solid block at -2 to place against
+                const referenceBlock = bot.blockAt(bot.entity.position.offset(0, -2, 0));
+                if (referenceBlock && referenceBlock.name !== 'air') {
+                  // Find a solid block in inventory
+                  const item = bot.inventory.items().find(i => i.name.includes('cobblestone') || i.name.includes('dirt') || i.name.includes('planks') || i.name.includes('stone'));
+                  if (item) {
+                    bot.equip(item, 'hand').then(() => {
+                      // Place block against the reference (below us)
+                      bot.placeBlock(referenceBlock, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
+                    }).catch(() => {});
+                    // Also jump to help
+                    bot.setControlState('jump', true);
+                    setTimeout(() => bot.setControlState('jump', false), 300);
+                  }
+                } else {
+                  // Just jump
+                  bot.setControlState('jump', true);
+                  setTimeout(() => bot.setControlState('jump', false), 300);
+                }
+                stuckTicks = 0;
+              } else if (stuckTicks >= 5) {
+                // General stuck, try to jump
                 bot.setControlState('jump', true);
-                setTimeout(() => bot.setControlState('jump', false), 400);
+                setTimeout(() => bot.setControlState('jump', false), 500);
                 stuckTicks = 0;
               }
             } else {
@@ -654,11 +682,9 @@ function createBot(botUsername) {
       // Mining / digging loop
       bot.mineInterval = setInterval(() => {
         if (!bot.entity) return;
-        // If we have a specific dig target, handle it first
         if (bot.digTarget) {
           const block = bot.blockAt(bot.digTarget);
           if (!block) {
-            // Block gone, clear target
             bot.digTarget = null;
             bot.pathfinder.setGoal(null);
             bot._activeGoalKey = null;
@@ -666,13 +692,11 @@ function createBot(botUsername) {
           }
           const distance = bot.entity.position.distanceTo(block.position);
           if (distance <= 3) {
-            // Close enough, dig
             bot.pathfinder.setGoal(null);
             bot._activeGoalKey = null;
             bot.digTarget = null;
             if (bot.canDigBlock(block)) bot.dig(block).catch(() => {});
           } else {
-            // Still moving toward it; ensure goal is set (if not already)
             const goalKey = `digTarget:${block.position.x},${block.position.y},${block.position.z}`;
             if (bot._activeGoalKey !== goalKey) {
               bot.pathfinder.setGoal(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 1), true);
@@ -682,7 +706,6 @@ function createBot(botUsername) {
           return;
         }
 
-        // General mining by block name
         if (bot.mineBlock && !bot.followTarget && !bot.comingTo) {
           const blocks = bot.findBlocks({ matching: b => b.name.includes(bot.mineBlock), count: 10 });
           if (blocks.length > 0) {
@@ -691,10 +714,8 @@ function createBot(botUsername) {
             if (!block) return;
             const distance = bot.entity.position.distanceTo(block.position);
             if (distance <= 3) {
-              // Already close, dig
               if (bot.canDigBlock(block)) bot.dig(block).catch(() => {});
             } else {
-              // Need to move to it
               const goalKey = `mine:${bot.mineBlock}:${blockPos.x},${blockPos.y},${blockPos.z}`;
               if (bot._activeGoalKey !== goalKey) {
                 bot.pathfinder.setGoal(new goals.GoalNear(blockPos.x, blockPos.y, blockPos.z, 1), true);
