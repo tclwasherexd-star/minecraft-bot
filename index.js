@@ -412,6 +412,7 @@ function executeCommand(botInstance, username, args, command) {
     }
     if (command === '!stopmine') {
       botInstance.mineBlock = null;
+      botInstance.digTarget = null;
       if (botInstance._activeGoalKey?.startsWith('mine:')) {
         botInstance.pathfinder.setGoal(null);
         botInstance._activeGoalKey = null;
@@ -419,27 +420,29 @@ function executeCommand(botInstance, username, args, command) {
       return;
     }
 
-    // !dig - FIXED: if no block name, only dig if within 6 blocks
+    // !dig - FIXED: if no block name, target block at cursor and walk to it before digging
     if (command === '!dig') {
       const blockName = args.slice(1).join('_');
       if (blockName) {
-        // Start mining that block type (as before)
+        // Start mining that block type (general mining)
         clearMovement(botInstance);
         botInstance.mineBlock = blockName;
+        botInstance.digTarget = null;
         safeWhisper(botInstance, username, `${botName} now digging ${blockName.replace(/_/g, ' ')}`);
       } else {
-        // Dig block at cursor, but only if close enough
-        const block = botInstance.blockAtCursor(6);
-        if (block) {
-          const dist = botInstance.entity.position.distanceTo(block.position);
-          if (dist <= 6) {
-            botInstance.dig(block).catch(() => {});
-          } else {
-            safeWhisper(botInstance, username, `${botName} cannot reach that block (too far).`);
-          }
-        } else {
-          safeWhisper(botInstance, username, `${botName} no block in reach.`);
+        // Specific block at cursor - pathfind to it then dig
+        const block = botInstance.blockAtCursor(10);
+        if (!block) {
+          safeWhisper(botInstance, username, `${botName} no block in sight.`);
+          return;
         }
+        clearMovement(botInstance);
+        botInstance.mineBlock = null;
+        botInstance.digTarget = block.position.clone();
+        // Set pathfinder goal to the block
+        botInstance.pathfinder.setGoal(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 1), true);
+        botInstance._activeGoalKey = `digTarget:${block.position.x},${block.position.y},${block.position.z}`;
+        safeWhisper(botInstance, username, `${botName} moving to dig block.`);
       }
       return;
     }
@@ -506,6 +509,7 @@ function clearMovement(bot) {
   bot.followTarget = null;
   bot.comingTo = null;
   bot.mineBlock = null;
+  bot.digTarget = null;
   bot._activeGoalKey = null;
 }
 
@@ -560,6 +564,7 @@ function createBot(botUsername) {
       bot.followTarget = null;
       bot.comingTo = null;
       bot.mineBlock = null;
+      bot.digTarget = null; // specific block target
       bot._activeGoalKey = null;
       // Initialize spam intervals
       bot.spamLinkInterval = null;
@@ -646,44 +651,57 @@ function createBot(botUsername) {
         }
       }, 500);
 
-      // Improved mine loop: bots pick random blocks from a wider selection,
-      // so they don't all target the same block.
+      // Mining / digging loop
       bot.mineInterval = setInterval(() => {
-        if (!bot.mineBlock || !bot.entity || bot.followTarget || bot.comingTo) return;
-
-        const activeGoal = bot._activeGoalKey;
-        if (activeGoal?.startsWith('mine:')) {
-          // Parse target coordinates from goal key: "mine:blockType:x,y,z"
-          const parts = activeGoal.split(':');
-          const posStr = parts[2];
-          const [x, y, z] = posStr.split(',').map(Number);
-          const block = bot.blockAt(new mineflayer.Vec3(x, y, z));
-          if (!block || !block.name.includes(bot.mineBlock)) {
-            // Target block is gone or no longer matches; clear and find new
+        if (!bot.entity) return;
+        // If we have a specific dig target, handle it first
+        if (bot.digTarget) {
+          const block = bot.blockAt(bot.digTarget);
+          if (!block) {
+            // Block gone, clear target
+            bot.digTarget = null;
             bot.pathfinder.setGoal(null);
             bot._activeGoalKey = null;
             return;
           }
           const distance = bot.entity.position.distanceTo(block.position);
-          if (distance <= 4) {
+          if (distance <= 3) {
             // Close enough, dig
             bot.pathfinder.setGoal(null);
             bot._activeGoalKey = null;
+            bot.digTarget = null;
             if (bot.canDigBlock(block)) bot.dig(block).catch(() => {});
+          } else {
+            // Still moving toward it; ensure goal is set (if not already)
+            const goalKey = `digTarget:${block.position.x},${block.position.y},${block.position.z}`;
+            if (bot._activeGoalKey !== goalKey) {
+              bot.pathfinder.setGoal(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 1), true);
+              bot._activeGoalKey = goalKey;
+            }
           }
-          // Otherwise, pathfinder is already moving; do nothing
           return;
         }
 
-        // No active mine goal; search for blocks and pick randomly
-        const blocks = bot.findBlocks({ matching: b => b.name.includes(bot.mineBlock), count: 10 });
-        if (blocks.length > 0) {
-          const blockPos = blocks[Math.floor(Math.random() * blocks.length)];
-          const block = bot.blockAt(blockPos);
-          if (!block) return;
-          const goalKey = `mine:${bot.mineBlock}:${blockPos.x},${blockPos.y},${blockPos.z}`;
-          bot.pathfinder.setGoal(new goals.GoalNear(blockPos.x, blockPos.y, blockPos.z, 2), true);
-          bot._activeGoalKey = goalKey;
+        // General mining by block name
+        if (bot.mineBlock && !bot.followTarget && !bot.comingTo) {
+          const blocks = bot.findBlocks({ matching: b => b.name.includes(bot.mineBlock), count: 10 });
+          if (blocks.length > 0) {
+            const blockPos = blocks[Math.floor(Math.random() * blocks.length)];
+            const block = bot.blockAt(blockPos);
+            if (!block) return;
+            const distance = bot.entity.position.distanceTo(block.position);
+            if (distance <= 3) {
+              // Already close, dig
+              if (bot.canDigBlock(block)) bot.dig(block).catch(() => {});
+            } else {
+              // Need to move to it
+              const goalKey = `mine:${bot.mineBlock}:${blockPos.x},${blockPos.y},${blockPos.z}`;
+              if (bot._activeGoalKey !== goalKey) {
+                bot.pathfinder.setGoal(new goals.GoalNear(blockPos.x, blockPos.y, blockPos.z, 1), true);
+                bot._activeGoalKey = goalKey;
+              }
+            }
+          }
         }
       }, 500);
     });
