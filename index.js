@@ -44,6 +44,9 @@ function createBot() {
       defaultMove.maxDropDown = 4;
       defaultMove.liquidCost = 10;
       defaultMove.avoidDamage = true;
+      defaultMove.allowFreeMotion = true;
+      defaultMove.allowEntityDetection = true;
+      defaultMove.blocksToAvoid = new Set(['lava', 'water', 'fire', 'cactus']);
       bot.pathfinder.setMovements(defaultMove);
       bot.pathfinder.enablePathShortcuts = true;
       bot.pathfinder.thinkTimeout = 50;
@@ -76,20 +79,15 @@ function createBot() {
         }
       }, 500);
 
-      // Follow loop
+      // Follow loop - WORKS FROM ANY DISTANCE
       setInterval(() => {
         if (followTarget && !freezeMode) {
           const target = bot.players[followTarget]?.entity;
           if (target) {
             const distance = bot.entity.position.distanceTo(target.position);
-            if (distance > 30) {
+            if (distance > 2) {
+              // Always teleport if not close enough (works from any distance)
               bot.entity.position = target.position.clone();
-            } else if (distance > 2) {
-              bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
-              if (!bot.pathfinder.isMoving()) {
-                bot.setControlState('jump', true);
-                setTimeout(() => bot.setControlState('jump', false), 300);
-              }
             }
           }
         }
@@ -102,16 +100,12 @@ function createBot() {
         const pos = bot.entity.position;
         if (lastPos && pos.distanceTo(lastPos) < 0.2 && bot.pathfinder.goal) {
           stuckCount++;
-          if (stuckCount > 10) {
+          if (stuckCount > 5) {
             addConsoleLog('Bot stuck, resetting...');
             bot.pathfinder.setGoal(null);
+            bot.setControlState('jump', true);
+            setTimeout(() => bot.setControlState('jump', false), 500);
             stuckCount = 0;
-            setTimeout(() => {
-              if (followTarget) {
-                const target = bot.players[followTarget]?.entity;
-                if (target) bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
-              }
-            }, 500);
           }
         } else {
           stuckCount = 0;
@@ -174,7 +168,7 @@ function createBot() {
       "",
       "INFO: !coords !status !info !players !nearbyplayers !nearbymobs !health [p] !whereis [p] !leakcoords [p] !exp !gamemode !uptime",
       "",
-      "MOVEMENT: !come !follow [p] !goto x y z !wander !stopwander !attachplayer [p] !attachmob !jump !stop !tpbring !tp [p] !call !skydrivebot !skydriveplayers [p] !lookatfollow [p]",
+      "MOVEMENT: !come !follow [p] !goto x y z !wander !stopwander !attachplayer [p] !attachmob !jump !stop !tpbring !tp [p] !call !skydrivebot !skydriveplayers [p] !lookatfollow [p] !flee [distance]",
       "",
       "COMBAT: !attack [p] !hunt [p] !protect !killbot !kick [p] !attackmobs !tntrain [p] !stopserver !healthgen",
       "",
@@ -202,7 +196,11 @@ function createBot() {
       if (command === '!cmdlist' || command === '!help') { showCmdList(username); return; }
       if (command === '!coords') { const p = bot.entity.position; safeWhisper(username, `X:${Math.round(p.x)} Y:${Math.round(p.y)} Z:${Math.round(p.z)}`); return; }
       if (command === '!status') { safeWhisper(username, `HP:${bot.health}/20 Food:${bot.food}/20`); return; }
+      if (command === '!info') { safeWhisper(username, `Biome:${bot.blockAt(bot.entity.position)?.biome.name} Ping:${bot.player.ping}ms`); return; }
+      if (command === '!inventory') { const items = bot.inventory.items().map(i => `${i.name}x${i.count}`).join(', '); safeWhisper(username, items || "Empty"); return; }
       if (command === '!players') { safeWhisper(username, `Online: ${Object.keys(bot.players).join(', ')}`); return; }
+      if (command === '!time') { safeWhisper(username, `Time: ${bot.time.timeOfDay}`); return; }
+      if (command === '!weather') { safeWhisper(username, bot.isRaining ? "Raining" : "Clear"); return; }
       if (command === '!jump') { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 500); return; }
       
       if (command === '!stop') {
@@ -217,14 +215,40 @@ function createBot() {
       
       if (command === '!killbot') { bot.chat('/kill'); safeWhisper(username, "Killing bot!"); return; }
       
+      // FIXED !tpbring - ALWAYS WORKS FROM ANY DISTANCE
       if (command === '!tpbring') {
         const player = bot.players[username];
-        if (player?.entity?.position) {
-          bot.entity.position = player.entity.position.clone();
-          safeWhisper(username, "Teleported to you!");
-        } else {
-          bot.chat(`/tp ${bot.username} ${username}`);
+        if (!player) {
+          safeWhisper(username, "Cannot find you in player list.");
+          return;
         }
+        
+        // Always teleport directly to player position if entity available
+        if (player.entity && player.entity.position) {
+          bot.entity.position = player.entity.position.clone();
+          safeWhisper(username, "Teleported bot to you! (any distance)");
+        } else {
+          // Fallback to /tp command
+          bot.chat(`/tp ${bot.username} ${username}`);
+          safeWhisper(username, "Teleporting via command...");
+        }
+        return;
+      }
+      
+      // IMPROVED !come - WORKS FROM ANY DISTANCE (INFINITE)
+      if (command === '!come') {
+        followTarget = null; huntTarget = null; attackTarget = null;
+        const target = bot.players[username]?.entity;
+        if (!target) {
+          // Player entity not loaded, use /tp command
+          bot.chat(`/tp ${bot.username} ${username}`);
+          safeWhisper(username, "Teleporting to you via command...");
+          return;
+        }
+        
+        // Always teleport directly (works from ANY distance)
+        bot.entity.position = target.position.clone();
+        safeWhisper(username, "Teleported to you! (works from any distance)");
         return;
       }
       
@@ -345,7 +369,7 @@ function createBot() {
         const hostile = bot.nearestEntity(e => e.type === 'hostile' || e.type === 'monster');
         if (hostile) {
           const away = bot.entity.position.minus(hostile.position).normalize().scale(distance).plus(bot.entity.position);
-          bot.pathfinder.setGoal(new goals.GoalNear(away.x, away.y, away.z, 1));
+          bot.pathfinder.setGoal(new goals.GoalNear(away.x, away.y, away.z, 1), true);
           safeWhisper(username, `Fleeing ${distance} blocks!`);
         }
         return;
@@ -390,20 +414,11 @@ function createBot() {
       
       if (command === '!stopwander') { wanderMode = false; bot.pathfinder.setGoal(null); safeWhisper(username, "Stopped wandering"); return; }
       
-      if (command === '!come') {
-        followTarget = null; huntTarget = null;
-        const target = bot.players[username]?.entity;
-        if (target) {
-          bot.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 1));
-        }
-        return;
-      }
-      
       if (command === '!follow') {
         const targetName = args[1] || username;
         if (bot.players[targetName]) {
           followTarget = targetName; huntTarget = null; attackTarget = null;
-          safeWhisper(username, `Following ${targetName}`);
+          safeWhisper(username, `Following ${targetName} (teleports to them)`);
         }
         return;
       }
@@ -412,7 +427,7 @@ function createBot() {
         const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
         if (!isNaN(x)) {
           followTarget = null;
-          bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1));
+          bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
         }
         return;
       }
@@ -543,10 +558,6 @@ function createBot() {
         if (args[1] === 'stop') { autoBreakBlock = null; } else { autoBreakBlock = args.slice(1).join('_'); }
         return;
       }
-      if (command === '!info') { safeWhisper(username, `Biome:${bot.blockAt(bot.entity.position)?.biome.name} Ping:${bot.player.ping}ms`); return; }
-      if (command === '!time') { safeWhisper(username, `Time: ${bot.time.timeOfDay}`); return; }
-      if (command === '!weather') { safeWhisper(username, bot.isRaining ? "Raining" : "Clear"); return; }
-      if (command === '!inventory') { const items = bot.inventory.items().map(i => `${i.name}x${i.count}`).join(', '); safeWhisper(username, items || "Empty"); return; }
       if (command === '!sleeptest') { const bed = bot.findBlock({ matching: b => b.name.includes('bed'), maxDistance: 16 }); if (bed) bot.sleep(bed).catch(() => {}); return; }
       
     } catch (e) {
