@@ -384,12 +384,13 @@ function executeCommand(botInstance, username, args, command) {
       return;
     }
     if (command === '!jump') {
-      if (botInstance.pathfinder.isMoving()) {
-        safeWhisper(botInstance, username, `${botName} is walking, can't jump on command right now.`);
+      // Only allow jump when not moving and on ground
+      if (botInstance.pathfinder.isMoving() || !botInstance.entity.onGround) {
+        safeWhisper(botInstance, username, `${botName} can't jump right now.`);
         return;
       }
       botInstance.setControlState('jump', true);
-      setTimeout(() => botInstance.setControlState('jump', false), 500);
+      setTimeout(() => botInstance.setControlState('jump', false), 300);
       return;
     }
     if (command === '!killbot') {
@@ -554,9 +555,9 @@ function createBot(botUsername) {
       const mcData = require('minecraft-data')(bot.version);
       const defaultMove = new Movements(bot, mcData);
       defaultMove.canDig = true;
-      defaultMove.allowParkour = true;
-      defaultMove.allowSprinting = true;
-      defaultMove.allow1by1towers = true; // let pathfinder handle pillar building
+      defaultMove.allowParkour = true;      // automatic jumping for small steps
+      defaultMove.allowSprinting = false;   // DISABLE SPRINTING to prevent "moved too quickly"
+      defaultMove.allow1by1towers = true;   // pathfinder can build pillars
       bot.pathfinder.setMovements(defaultMove);
 
       bot.followTarget = null;
@@ -568,12 +569,13 @@ function createBot(botUsername) {
       bot.spamTextInterval = null;
       bot.spamMsgInterval = null;
       let stuckTicks = 0;
-      let lastActionTime = 0; // cooldown for manual stuck actions (now 3 seconds)
+      let lastActionTime = 0; // cooldown for manual stuck actions (2 seconds)
+      let lastJumpTime = 0;   // cooldown for manual jumps (2 seconds)
 
       // Helper: place a block directly below the bot without jumping
       function placeBlockBelow(bot) {
         const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-        if (!blockBelow || blockBelow.name === 'air') return false; // can't place on air
+        if (!blockBelow || blockBelow.name === 'air') return false;
         const item = bot.inventory.items().find(i =>
           i.name.includes('cobblestone') || i.name.includes('dirt') ||
           i.name.includes('planks') || i.name.includes('stone') ||
@@ -582,7 +584,6 @@ function createBot(botUsername) {
         if (!item) return false;
         return bot.equip(item, 'hand')
           .then(() => {
-            // Look straight down and place on the block below us
             const reference = bot.blockAt(bot.entity.position.offset(0, -2, 0));
             if (!reference || reference.name === 'air') return false;
             return bot.placeBlock(reference, new mineflayer.Vec3(0, 1, 0));
@@ -607,10 +608,10 @@ function createBot(botUsername) {
         return false;
       }
 
-      // Main stuck handler: tries to break block or place pillar, but NEVER jumps
+      // Main stuck handler: tries to break block, place pillar, or safe jump
       function handleStuck(bot, targetY) {
         const now = Date.now();
-        if (now - lastActionTime < 3000) return; // 3 second cooldown
+        if (now - lastActionTime < 2000) return; // 2 second cooldown
         if (!bot.entity.onGround) return; // only act when on ground
         lastActionTime = now;
         stuckTicks = 0;
@@ -621,6 +622,15 @@ function createBot(botUsername) {
         // If target is above, try to place block below
         if (targetY > bot.entity.position.y + 1.5) {
           placeBlockBelow(bot).catch(() => {});
+          return;
+        }
+
+        // If target is exactly one block above and we can't place, do a safe jump
+        const yDiff = targetY - bot.entity.position.y;
+        if (yDiff > 0.5 && yDiff <= 1.5 && now - lastJumpTime > 2000) {
+          lastJumpTime = now;
+          bot.setControlState('jump', true);
+          setTimeout(() => bot.setControlState('jump', false), 300);
         }
         // If target is below or same level, do nothing; pathfinder will handle
       }
@@ -633,8 +643,11 @@ function createBot(botUsername) {
           const goalKey = `follow:${bot.followTarget}`;
 
           if (distance > 2) {
-            if (bot._activeGoalKey !== goalKey) {
-              bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true);
+            // Use GoalNear to the player's current position, updated every 2 seconds
+            const now = Date.now();
+            if (!bot._followGoalTime || now - bot._followGoalTime > 2000) {
+              bot.pathfinder.setGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2), true);
+              bot._followGoalTime = now;
               bot._activeGoalKey = goalKey;
               stuckTicks = 0;
             }
@@ -652,12 +665,14 @@ function createBot(botUsername) {
               bot.pathfinder.setGoal(null);
               bot.clearControlStates();
               bot._activeGoalKey = null;
+              bot._followGoalTime = 0;
             }
           }
         } else if (bot._activeGoalKey?.startsWith('follow:')) {
           bot.pathfinder.setGoal(null);
           bot.clearControlStates();
           bot._activeGoalKey = null;
+          bot._followGoalTime = 0;
         }
       }, 500);
 
