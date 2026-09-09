@@ -556,7 +556,7 @@ function createBot(botUsername) {
       defaultMove.canDig = true;
       defaultMove.allowParkour = true;
       defaultMove.allowSprinting = true;
-      defaultMove.allow1by1towers = true;
+      defaultMove.allow1by1towers = true; // let pathfinder handle pillar building
       bot.pathfinder.setMovements(defaultMove);
 
       bot.followTarget = null;
@@ -568,52 +568,29 @@ function createBot(botUsername) {
       bot.spamTextInterval = null;
       bot.spamMsgInterval = null;
       let stuckTicks = 0;
-      let lastActionTime = 0; // cooldown for stuck actions
+      let lastActionTime = 0; // cooldown for manual stuck actions (now 3 seconds)
 
-      // Helper function to handle stuck: build pillar, break block, or jump
-      function handleStuck(bot, targetY) {
-        const now = Date.now();
-        if (now - lastActionTime < 800) return;
-        lastActionTime = now;
-        stuckTicks = 0;
-
-        if (targetY > bot.entity.position.y + 1.5) {
-          buildPillar(bot);
-          return;
-        }
-        breakBlockInFront(bot);
-      }
-
-      function buildPillar(bot) {
+      // Helper: place a block directly below the bot without jumping
+      function placeBlockBelow(bot) {
+        const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+        if (!blockBelow || blockBelow.name === 'air') return false; // can't place on air
         const item = bot.inventory.items().find(i =>
           i.name.includes('cobblestone') || i.name.includes('dirt') ||
           i.name.includes('planks') || i.name.includes('stone') ||
           i.name.includes('sand') || i.name.includes('gravel')
         );
-        if (!item) {
-          bot.setControlState('jump', true);
-          setTimeout(() => bot.setControlState('jump', false), 300);
-          return;
-        }
-        bot.equip(item, 'hand')
+        if (!item) return false;
+        return bot.equip(item, 'hand')
           .then(() => {
-            bot.setControlState('jump', true);
-            setTimeout(() => {
-              const blockBelow = bot.blockAt(bot.entity.position.offset(0, -2, 0));
-              const placePos = bot.entity.position.offset(0, -1, 0);
-              const blockAtPlace = bot.blockAt(placePos);
-              if (blockBelow && blockBelow.name !== 'air' && blockAtPlace && blockAtPlace.name === 'air') {
-                bot.placeBlock(blockBelow, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
-              }
-              bot.setControlState('jump', false);
-            }, 250);
+            // Look straight down and place on the block below us
+            const reference = bot.blockAt(bot.entity.position.offset(0, -2, 0));
+            if (!reference || reference.name === 'air') return false;
+            return bot.placeBlock(reference, new mineflayer.Vec3(0, 1, 0));
           })
-          .catch(() => {
-            bot.setControlState('jump', true);
-            setTimeout(() => bot.setControlState('jump', false), 300);
-          });
+          .catch(() => false);
       }
 
+      // Helper: break block in front without jumping
       function breakBlockInFront(bot) {
         const yaw = bot.entity.yaw;
         const dx = -Math.sin(yaw);
@@ -624,11 +601,28 @@ function createBot(botUsername) {
           if (block && block.name !== 'air' && bot.canDigBlock(block) &&
               bot.entity.position.distanceTo(block.position) <= 4) {
             bot.dig(block).catch(() => {});
-            return;
+            return true;
           }
         }
-        bot.setControlState('jump', true);
-        setTimeout(() => bot.setControlState('jump', false), 300);
+        return false;
+      }
+
+      // Main stuck handler: tries to break block or place pillar, but NEVER jumps
+      function handleStuck(bot, targetY) {
+        const now = Date.now();
+        if (now - lastActionTime < 3000) return; // 3 second cooldown
+        if (!bot.entity.onGround) return; // only act when on ground
+        lastActionTime = now;
+        stuckTicks = 0;
+
+        // First try to break block in front
+        if (breakBlockInFront(bot)) return;
+
+        // If target is above, try to place block below
+        if (targetY > bot.entity.position.y + 1.5) {
+          placeBlockBelow(bot).catch(() => {});
+        }
+        // If target is below or same level, do nothing; pathfinder will handle
       }
 
       bot.followInterval = setInterval(() => {
