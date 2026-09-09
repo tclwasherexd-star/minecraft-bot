@@ -8,34 +8,26 @@ const config = {
   port: 50838, 
   version: '1.20.1', 
   auth: 'offline',
-  checkTimeoutInterval: 120000,
-  hideErrors: true
+  checkTimeoutInterval: 300000,
+  hideErrors: true,
+  connectTimeout: 30000
 };
 
 const myUsername = ['tcl', 'friend1', 'friend2', 'friend3', 'friend4', 'friend5'];
 const useAuthPlugin = false;
 const accountPassword = 'YourBotPassword123';
 
-// Realistic player names for bots
+// 6 bots with realistic names
 const botNames = [
   'Steve_Pro',
   'Alex_Miner',
   'Diamond_Knight',
   'Creeper_Slayer',
   'Enderman_Hunter',
-  'Redstone_Wiz',
-  'Nether_King',
-  'Ender_Dragon',
-  'Wither_Boss',
-  'Herobrine_X',
-  'Shadow_Blade',
-  'Pixel_Warrior',
-  'Minecraft_Legend',
-  'Block_Master',
-  'Craft_King'
+  'Redstone_Wiz'
 ];
 
-const NUMBER_OF_BOTS = botNames.length; // 15 bots
+const NUMBER_OF_BOTS = 6;
 
 let bots = {};
 let consoleLogs = [];
@@ -44,13 +36,14 @@ let botStatus = {};
 let botPlaytime = {};
 let botJoinTime = {};
 let botsCreated = 0;
+let reconnectCount = {};
 
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Website started on port ${PORT}`);
-  console.log(`Running ${NUMBER_OF_BOTS} bots with realistic names`);
+  console.log(`Running ${NUMBER_OF_BOTS} bots`);
   global.startTime = Date.now();
   createNextBot();
 });
@@ -67,12 +60,21 @@ function createNextBot() {
   
   createBot(botUsername);
   
-  setTimeout(createNextBot, 3000);
+  setTimeout(createNextBot, 15000);
 }
 
 function createBot(botUsername) {
   if (bots[botUsername] && bots[botUsername].entity) {
-    addConsoleLog(`${botUsername} already connected, skipping...`);
+    return;
+  }
+  
+  reconnectCount[botUsername] = reconnectCount[botUsername] || 0;
+  if (reconnectCount[botUsername] > 5) {
+    addConsoleLog(`${botUsername} too many reconnects, waiting 5 minutes...`);
+    setTimeout(() => {
+      reconnectCount[botUsername] = 0;
+      createBot(botUsername);
+    }, 300000);
     return;
   }
 
@@ -87,9 +89,18 @@ function createBot(botUsername) {
     botPlaytime[botUsername] = botPlaytime[botUsername] || 0;
     addConsoleLog(`${botUsername} connecting...`);
 
+    const connectionTimeout = setTimeout(() => {
+      if (botStatus[botUsername] === 'connecting') {
+        addConsoleLog(`${botUsername} connection timeout, retrying...`);
+        bot.end('Connection timeout');
+      }
+    }, 30000);
+
     bot.on('spawn', () => {
+      clearTimeout(connectionTimeout);
       botStatus[botUsername] = 'online';
       botJoinTime[botUsername] = Date.now();
+      reconnectCount[botUsername] = 0;
       addConsoleLog(`${botUsername} joined!`);
       
       const mcData = require('minecraft-data')(bot.version);
@@ -100,8 +111,6 @@ function createBot(botUsername) {
       defaultMove.allowParkour = true;
       defaultMove.allowSprinting = true;
       defaultMove.maxDropDown = 5;
-      defaultMove.liquidCost = 5;
-      defaultMove.avoidDamage = true;
       
       bot.pathfinder.setMovements(defaultMove);
       bot.pathfinder.enablePathShortcuts = true;
@@ -109,32 +118,6 @@ function createBot(botUsername) {
 
       bot.followTarget = null;
       bot.attackTarget = null;
-      bot.huntTarget = null;
-      bot.mineBlock = null;
-      bot.attackMobs = false;
-      bot.protectMode = false;
-      bot.freezeMode = false;
-
-      setInterval(() => {
-        if (bot.followTarget && !bot.freezeMode && bot.entity) {
-          const target = bot.players[bot.followTarget]?.entity;
-          if (target) {
-            bot.pathfinder.setGoal(new goals.GoalFollow(target, 3), true);
-          }
-        }
-      }, 2000);
-
-      setInterval(() => {
-        if (bot.attackTarget && !bot.freezeMode && bot.entity) {
-          const target = bot.players[bot.attackTarget]?.entity;
-          if (target) {
-            bot.pathfinder.setGoal(new goals.GoalFollow(target, 3), true);
-            if (bot.entity.position.distanceTo(target.position) < 3) {
-              bot.attack(target);
-            }
-          }
-        }
-      }, 2000);
     });
 
     bot.on('message', (jsonMsg) => {
@@ -145,40 +128,41 @@ function createBot(botUsername) {
     });
 
     bot.on('error', (err) => {
-      if (!err.message.includes('ECONNRESET') && !err.message.includes('ETIMEDOUT')) {
-        addConsoleLog(`${botUsername} Error: ${err.message}`);
-      }
-      botStatus[botUsername] = 'error';
+      // Silently handle errors
     });
 
     bot.on('kicked', (reason) => {
-      addConsoleLog(`${botUsername} Kicked: ${JSON.stringify(reason)}`);
+      clearTimeout(connectionTimeout);
+      addConsoleLog(`${botUsername} Kicked: ${JSON.stringify(reason).substring(0, 100)}`);
       botStatus[botUsername] = 'kicked';
       if (botJoinTime[botUsername]) {
         botPlaytime[botUsername] += Date.now() - botJoinTime[botUsername];
         botJoinTime[botUsername] = null;
       }
+      reconnectCount[botUsername]++;
     });
 
     bot.on('end', (reason) => {
+      clearTimeout(connectionTimeout);
       botStatus[botUsername] = 'offline';
       if (botJoinTime[botUsername]) {
         botPlaytime[botUsername] += Date.now() - botJoinTime[botUsername];
         botJoinTime[botUsername] = null;
       }
-      addConsoleLog(`${botUsername} disconnected, reconnecting in 10s...`);
+      addConsoleLog(`${botUsername} disconnected, reconnecting in 30s...`);
       
       setTimeout(() => {
         if (botStatus[botUsername] !== 'online') {
           createBot(botUsername);
         }
-      }, 10000);
+      }, 30000);
     });
 
   } catch (e) {
     addConsoleLog(`${botUsername} Failed: ${e.message}`);
     botStatus[botUsername] = 'error';
-    setTimeout(() => createBot(botUsername), 15000);
+    reconnectCount[botUsername]++;
+    setTimeout(() => createBot(botUsername), 30000);
   }
 
   function addConsoleLog(message) {
@@ -236,7 +220,7 @@ function createBot(botUsername) {
     let botArg = null;
     let commandArgs = args;
     
-    const textCommands = ['!talk', '!shout', '!msg', '!textspam', '!spamprivmsg', '!echo'];
+    const textCommands = ['!talk', '!shout', '!msg'];
     
     if (textCommands.includes(command)) {
       const possibleBotArg = args[1];
@@ -304,11 +288,6 @@ function createBot(botUsername) {
         if (botInstance.players[targetName]) botInstance.followTarget = targetName;
         return;
       }
-      if (command === '!goto') {
-        const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
-        if (!isNaN(x)) botInstance.pathfinder.setGoal(new goals.GoalNear(x, y, z, 1), true);
-        return;
-      }
       if (command === '!attack') {
         if (args[1] && botInstance.players[args[1]]) botInstance.attackTarget = args[1];
         return;
@@ -316,9 +295,6 @@ function createBot(botUsername) {
       if (command === '!talk') { if (args[1]) botInstance.chat(args.slice(1).join(' ')); return; }
       if (command === '!shout') { if (args[1]) botInstance.chat(args.slice(1).join(' ').toUpperCase() + '!!!'); return; }
       if (command === '!msg') { if (args[1] && args[2]) safeWhisper(botInstance, args[1], args.slice(2).join(' ')); return; }
-      if (command === '!kick') { if (args[1]) botInstance.chat('/kick ' + args[1]); return; }
-      if (command === '!survival' || command === '!survial') { botInstance.chat('/gamemode survival'); return; }
-      if (command === '!creative') { botInstance.chat('/gamemode creative'); return; }
       if (command === '!ping') { safeWhisper(botInstance, username, `Ping: ${botInstance.player?.ping || 'unknown'}ms`); return; }
       
     } catch (e) {}
@@ -333,7 +309,6 @@ function createBot(botUsername) {
 // Website
 app.get('/', (req, res) => {
   const onlineCount = Object.values(botStatus).filter(s => s === 'online').length;
-  const memUsage = process.memoryUsage();
   
   res.send(`
     <!DOCTYPE html>
@@ -352,27 +327,21 @@ app.get('/', (req, res) => {
         .online { color: #4CAF50; }
         .offline { color: #ff4444; }
         .connecting { color: #FFA500; }
+        .kicked { color: #ff6600; }
       </style>
     </head>
     <body>
       <h1>CloudAFK Bots Dashboard</h1>
-      <div class="card">
-        <h3>Bots Online</h3>
-        <div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div>
-      </div>
-      <div class="card">
-        <h3>RAM Usage</h3>
-        <div class="value">${Math.round(memUsage.heapUsed / 1024 / 1024)} MB / 4 GB</div>
-      </div>
+      <div class="card"><h3>Bots Online</h3><div class="value">${onlineCount} / ${NUMBER_OF_BOTS}</div></div>
       <table>
         <thead>
           <tr><th>Bot Name</th><th>Status</th><th>Playtime</th></tr>
         </thead>
         <tbody>
-          ${Object.keys(botStatus).map(name => `
+          ${botNames.map(name => `
             <tr>
               <td>${name}</td>
-              <td class="${botStatus[name]}">${botStatus[name]}</td>
+              <td class="${botStatus[name] || 'offline'}">${botStatus[name] || 'not connected'}</td>
               <td>${fmtTime((botPlaytime[name] || 0) + (botJoinTime[name] ? Date.now() - botJoinTime[name] : 0))}</td>
             </tr>
           `).join('')}
