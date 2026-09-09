@@ -419,18 +419,27 @@ function executeCommand(botInstance, username, args, command) {
       return;
     }
 
-    // !dig - improved: optional block name to start mining, otherwise dig at cursor
+    // !dig - FIXED: if no block name, only dig if within 6 blocks
     if (command === '!dig') {
       const blockName = args.slice(1).join('_');
       if (blockName) {
-        // Start mining that block type
+        // Start mining that block type (as before)
         clearMovement(botInstance);
         botInstance.mineBlock = blockName;
         safeWhisper(botInstance, username, `${botName} now digging ${blockName.replace(/_/g, ' ')}`);
       } else {
-        // Dig block at cursor (raycast 128)
-        const block = botInstance.blockAtCursor(128);
-        if (block) botInstance.dig(block).catch(() => {});
+        // Dig block at cursor, but only if close enough
+        const block = botInstance.blockAtCursor(6);
+        if (block) {
+          const dist = botInstance.entity.position.distanceTo(block.position);
+          if (dist <= 6) {
+            botInstance.dig(block).catch(() => {});
+          } else {
+            safeWhisper(botInstance, username, `${botName} cannot reach that block (too far).`);
+          }
+        } else {
+          safeWhisper(botInstance, username, `${botName} no block in reach.`);
+        }
       }
       return;
     }
