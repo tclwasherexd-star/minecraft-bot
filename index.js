@@ -569,6 +569,7 @@ function createBot(botUsername) {
       bot.spamTextInterval = null;
       bot.spamMsgInterval = null;
       let stuckTicks = 0;
+      let lastActionTime = 0; // cooldown for stuck actions
 
       bot.followInterval = setInterval(() => {
         if (bot.followTarget && bot.entity) {
@@ -585,41 +586,56 @@ function createBot(botUsername) {
               stuckTicks = 0;
             }
 
-            // Improved vertical following: if target is above and bot is stuck, build or jump
-            if (!bot.pathfinder.isMoving()) {
-              stuckTicks++;
-              const targetY = target.position.y;
-              const botY = bot.entity.position.y;
+            const isMoving = bot.pathfinder.isMoving();
+            const targetY = target.position.y;
+            const botY = bot.entity.position.y;
 
-              // If target is more than 1 block above, attempt pillar building immediately
-              if (targetY > botY + 1) {
-                // Try to place a block beneath us and jump
-                const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-                // We need a solid block at -2 to place against
-                const referenceBlock = bot.blockAt(bot.entity.position.offset(0, -2, 0));
-                if (referenceBlock && referenceBlock.name !== 'air') {
-                  // Find a solid block in inventory
-                  const item = bot.inventory.items().find(i => i.name.includes('cobblestone') || i.name.includes('dirt') || i.name.includes('planks') || i.name.includes('stone'));
+            if (!isMoving) {
+              stuckTicks++;
+              const now = Date.now();
+              // Only attempt an action if cooldown passed (500ms)
+              if (now - lastActionTime > 500) {
+                lastActionTime = now;
+                stuckTicks = 0;
+
+                // 1. If target is above, try pillar building first
+                if (targetY > botY + 1.5) {
+                  const item = bot.inventory.items().find(i => 
+                    i.name.includes('cobblestone') || i.name.includes('dirt') || 
+                    i.name.includes('planks') || i.name.includes('stone') || 
+                    i.name.includes('sand') || i.name.includes('gravel')
+                  );
                   if (item) {
                     bot.equip(item, 'hand').then(() => {
-                      // Place block against the reference (below us)
-                      bot.placeBlock(referenceBlock, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
+                      bot.setControlState('jump', true);
+                      setTimeout(() => {
+                        const refBlock = bot.blockAt(bot.entity.position.offset(0, -2, 0));
+                        if (refBlock) {
+                          bot.placeBlock(refBlock, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
+                        }
+                        bot.setControlState('jump', false);
+                      }, 200);
                     }).catch(() => {});
-                    // Also jump to help
+                  } else {
+                    // no block, just jump
                     bot.setControlState('jump', true);
                     setTimeout(() => bot.setControlState('jump', false), 300);
                   }
                 } else {
-                  // Just jump
-                  bot.setControlState('jump', true);
-                  setTimeout(() => bot.setControlState('jump', false), 300);
+                  // 2. Not above, try to break block in front
+                  const yaw = bot.entity.yaw;
+                  const dx = -Math.sin(yaw);
+                  const dz = -Math.cos(yaw);
+                  const frontPos = bot.entity.position.offset(dx, 1, dz); // block at head/body level
+                  const frontBlock = bot.blockAt(frontPos);
+                  if (frontBlock && frontBlock.name !== 'air' && bot.canDigBlock(frontBlock)) {
+                    bot.dig(frontBlock).catch(() => {});
+                  } else {
+                    // 3. Just jump to clear small obstacles
+                    bot.setControlState('jump', true);
+                    setTimeout(() => bot.setControlState('jump', false), 300);
+                  }
                 }
-                stuckTicks = 0;
-              } else if (stuckTicks >= 5) {
-                // General stuck, try to jump
-                bot.setControlState('jump', true);
-                setTimeout(() => bot.setControlState('jump', false), 500);
-                stuckTicks = 0;
               }
             } else {
               stuckTicks = 0;
