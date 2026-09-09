@@ -593,13 +593,12 @@ function createBot(botUsername) {
             if (!isMoving) {
               stuckTicks++;
               const now = Date.now();
-              // Only attempt an action if cooldown passed (500ms)
-              if (now - lastActionTime > 500) {
+              if (now - lastActionTime > 800) {
                 lastActionTime = now;
                 stuckTicks = 0;
 
-                // 1. If target is above, try pillar building first
                 if (targetY > botY + 1.5) {
+                  // Build pillar
                   const item = bot.inventory.items().find(i => 
                     i.name.includes('cobblestone') || i.name.includes('dirt') || 
                     i.name.includes('planks') || i.name.includes('stone') || 
@@ -610,28 +609,36 @@ function createBot(botUsername) {
                       bot.setControlState('jump', true);
                       setTimeout(() => {
                         const refBlock = bot.blockAt(bot.entity.position.offset(0, -2, 0));
-                        if (refBlock) {
+                        const placePos = bot.entity.position.offset(0, -1, 0);
+                        const blockAtPlace = bot.blockAt(placePos);
+                        if (refBlock && refBlock.name !== 'air' && blockAtPlace && blockAtPlace.name === 'air') {
                           bot.placeBlock(refBlock, new mineflayer.Vec3(0, 1, 0)).catch(() => {});
                         }
                         bot.setControlState('jump', false);
                       }, 200);
                     }).catch(() => {});
                   } else {
-                    // no block, just jump
                     bot.setControlState('jump', true);
                     setTimeout(() => bot.setControlState('jump', false), 300);
                   }
                 } else {
-                  // 2. Not above, try to break block in front
+                  // Try to break block in front (within 4 blocks) if not above target
                   const yaw = bot.entity.yaw;
                   const dx = -Math.sin(yaw);
                   const dz = -Math.cos(yaw);
-                  const frontPos = bot.entity.position.offset(dx, 1, dz); // block at head/body level
-                  const frontBlock = bot.blockAt(frontPos);
-                  if (frontBlock && frontBlock.name !== 'air' && bot.canDigBlock(frontBlock)) {
-                    bot.dig(frontBlock).catch(() => {});
-                  } else {
-                    // 3. Just jump to clear small obstacles
+                  // Check a few points in front (1,2,3 blocks ahead at head height)
+                  let broke = false;
+                  for (let i = 1; i <= 3; i++) {
+                    const checkPos = bot.entity.position.offset(dx * i, 1, dz * i);
+                    const block = bot.blockAt(checkPos);
+                    if (block && block.name !== 'air' && bot.canDigBlock(block) && bot.entity.position.distanceTo(block.position) <= 4) {
+                      bot.dig(block).catch(() => {});
+                      broke = true;
+                      break;
+                    }
+                  }
+                  if (!broke) {
+                    // Just jump
                     bot.setControlState('jump', true);
                     setTimeout(() => bot.setControlState('jump', false), 300);
                   }
