@@ -811,6 +811,8 @@ function setPathGoal(bot, goal, key = '') {
     bot._activeGoalKey = key || null;
     bot._lastPathSetAt = Date.now();
     bot._pathFailures = 0;
+  bot._lastManualJumpAt = 0;
+  bot._manualJumping = false;
     return true;
   } catch (error) {
     bot._pathFailures = (bot._pathFailures || 0) + 1;
@@ -1058,6 +1060,87 @@ function getBlockInFront(bot, maxDistance = 3) {
     }
   }
   return null;
+}
+
+
+function tryJumpOneBlock(bot, target) {
+  if (!bot?.entity || !target || bot._manualJumping) return false;
+  if (bot._buildingBusy || bot._digBusy) return false;
+  if (isInLiquid(bot)) return false;
+  const now = Date.now();
+  if (now - (bot._lastManualJumpAt || 0) < 1200) return false;
+
+  const dx = target.position.x - bot.entity.position.x;
+  const dz = target.position.z - bot.entity.position.z;
+  const horizontal = Math.hypot(dx, dz);
+  if (horizontal < 0.8 || horizontal > 4.2) return false;
+
+  const ux = dx / horizontal;
+  const uz = dz / horizontal;
+  const base = bot.entity.position.floored();
+
+  // Look one block ahead in the direction of the target. If it is a
+  // one-block-high solid obstacle with two clear spaces above it, jump it.
+  const obstacle = bot.blockAt(new Vec3(
+    Math.floor(base.x + ux + 0.5),
+    base.y,
+    Math.floor(base.z + uz + 0.5)
+  ));
+  const head = bot.blockAt(new Vec3(
+    obstacle?.position.x ?? 0,
+    base.y + 1,
+    obstacle?.position.z ?? 0
+  ));
+  const above = bot.blockAt(new Vec3(
+    obstacle?.position.x ?? 0,
+    base.y + 2,
+    obstacle?.position.z ?? 0
+  ));
+
+  if (!obstacle || obstacle.boundingBox === 'empty') return false;
+  if (!head || head.boundingBox !== 'empty') return false;
+  if (!above || above.boundingBox !== 'empty') return false;
+
+  const nearestBot = getNearestOtherBot(bot, 2.2);
+  if (nearestBot && isBotAhead(bot, nearestBot, 2.2)) return false;
+
+  bot._lastManualJumpAt = now;
+  bot._manualJumping = true;
+
+  try {
+    bot.pathfinder.setGoal(null);
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
+    bot.setControlState('jump', true);
+  } catch (_) {}
+
+  setTimeout(() => {
+    try {
+      bot.setControlState('jump', false);
+      bot.setControlState('forward', false);
+      bot.setControlState('sprint', false);
+    } catch (_) {}
+
+    bot._manualJumping = false;
+
+    if (!bot.entity) return;
+    const freshTarget = bot.followTarget
+      ? bot.players[bot.followTarget]?.entity
+      : bot.comingTo
+        ? bot.players[bot.comingTo]?.entity
+        : null;
+    if (!freshTarget) return;
+
+    try {
+      if (bot.followTarget) {
+        repathToPlayer(bot, freshTarget, 'follow');
+      } else if (bot.comingTo) {
+        repathToPlayer(bot, freshTarget, 'come');
+      }
+    } catch (_) {}
+  }, 650);
+
+  return true;
 }
 
 function getBuildingBlock(bot) {
@@ -1365,6 +1448,8 @@ function updateFollow(bot) {
     }
   }
 
+  if (tryJumpOneBlock(bot, target)) return;
+
   const now = Date.now();
   if (target.position.y > bot.entity.position.y + 2 && bot._stuckTicks >= 2) {
     towerUpToward(bot, target.position.y).catch(() => {});
@@ -1423,6 +1508,8 @@ function updateCome(bot) {
     recoverFromWater(bot).catch(() => {});
     return;
   }
+
+  if (tryJumpOneBlock(bot, target)) return;
 
   const now = Date.now();
   if (target.position.y > bot.entity.position.y + 2 && bot._stuckTicks >= 2) {
