@@ -31,18 +31,20 @@ const PORT = process.env.PORT || 3000;
 
 const RECONNECT_BASE_MS = 5000;
 const RECONNECT_MAX_MS = 60000;
-const FOLLOW_UPDATE_MS = 350;
-const COME_UPDATE_MS = 300;
-const MINE_UPDATE_MS = 500;
-const LOOK_UPDATE_MS = 150;
-const STUCK_CHECK_MS = 750;
+const FOLLOW_UPDATE_MS = 750;
+const COME_UPDATE_MS = 750;
+const MINE_UPDATE_MS = 900;
+const LOOK_UPDATE_MS = 300;
+const STUCK_CHECK_MS = 1000;
 const STUCK_DISTANCE = 0.08;
 const STUCK_LIMIT = 4;
+const RECOVERY_COOLDOWN_MS = 2500;
+const TOWER_COOLDOWN_MS = 1200;
 const WATER_RECOVERY_MS = 1000;
-const PATH_RETRY_MS = 1500;
+const PATH_RETRY_MS = 2500;
 const FOLLOW_DISTANCE = 2.2;
 const COME_DISTANCE = 2.0;
-const DUPLICATE_WINDOW_MS = 400;
+const DUPLICATE_WINDOW_MS = 1500;
 const SPAM_INTERVAL_MS = 1000;
 
 const bots = Object.create(null);
@@ -59,6 +61,12 @@ let commandLeaderUsername = null;
 const mcServerState = { status: 'checking', latency: null, lastChecked: 0, error: '' };
 let mcProbeInFlight = false;
 const recentCommands = new Map();
+
+// Shared multi-bot building/mining reservations.
+const miningClaims = new Map();
+const placementClaims = new Map();
+const CLAIM_TTL_MS = 5000;
+const BOT_COLLISION_RADIUS = 1.6;
 
 function logConsole(message) {
   consoleLogs.push(`[${new Date().toLocaleTimeString()}] ${message}`);
@@ -135,6 +143,8 @@ function stopSpam(bot) {
 }
 
 function clearMovement(bot) {
+  releaseMiningClaim(bot);
+  releasePlacementClaim(bot);
   bot.followTarget = null;
   bot.comingTo = null;
   bot.mineBlock = null;
@@ -152,6 +162,8 @@ function clearMovement(bot) {
 }
 
 function stopOnlyMovement(bot) {
+  releaseMiningClaim(bot);
+  releasePlacementClaim(bot);
   bot.followTarget = null;
   bot.comingTo = null;
   bot.mineBlock = null;
@@ -212,26 +224,26 @@ const COMMAND_REFERENCE = [
   {
     group: 'Info',
     lines: [
-      '!coords [bot|all] â€” bot X/Y/Z',
-      '!status [bot|all] â€” bot HP',
-      '!ping [bot|all] â€” bot ping',
-      '!players [bot|all] â€” online players',
-      '!exp [bot|all] â€” bot XP level',
-      '!gamemode [bot|all] â€” bot gamemode',
-      '!uptime [bot|all] â€” time since last join',
-      '!inventory [bot|all] â€” bot inventory',
-      '!botcount â€” online bot count',
+      '!coords [bot|all] — bot X/Y/Z',
+      '!status [bot|all] — bot HP',
+      '!ping [bot|all] — bot ping',
+      '!players [bot|all] — online players',
+      '!exp [bot|all] — bot XP level',
+      '!gamemode [bot|all] — bot gamemode',
+      '!uptime [bot|all] — time since last join',
+      '!inventory [bot|all] — bot inventory',
+      '!botcount — online bot count',
     ],
   },
   {
     group: 'Movement',
     lines: [
-      '!come [bot|all] â€” walk to you',
-      '!follow [player] [bot|all] â€” continuously follow a player',
-      '!goto <x> <y> <z> [bot|all] â€” walk to coordinates',
-      '!line [bot|all] â€” teleport into a line behind you',
-      '!stop [bot|all] â€” stop movement/mining/spam',
-      '!jump [bot|all] â€” single jump',
+      '!come [bot|all] — walk to you',
+      '!follow [player] [bot|all] — continuously follow a player',
+      '!goto <x> <y> <z> [bot|all] — walk to coordinates',
+      '!line [bot|all] — teleport into a line behind you',
+      '!stop [bot|all] — stop movement/mining/spam',
+      '!jump [bot|all] — single jump',
       '!sneak [bot|all]',
       '!unsneak [bot|all]',
     ],
@@ -239,14 +251,14 @@ const COMMAND_REFERENCE = [
   {
     group: 'Looking',
     lines: [
-      '!lookat <player> [bot|all] â€” continuously track a player',
-      '!lookatstop [bot|all] â€” stop tracking',
+      '!lookat <player> [bot|all] — continuously track a player',
+      '!lookatstop [bot|all] — stop tracking',
     ],
   },
   {
     group: 'Teleport',
     lines: [
-      '!tpbring [bot|all] â€” request server teleport to you',
+      '!tpbring [bot|all] — request server teleport to you',
     ],
   },
   {
@@ -261,9 +273,9 @@ const COMMAND_REFERENCE = [
   {
     group: 'Spam',
     lines: [
-      '!link <url> [bot|all] â€” rate-limited chat repeat',
-      '!spamtext <message> [bot|all] â€” rate-limited chat repeat',
-      '!msgspam <player> <message> [bot|all] â€” rate-limited whisper repeat',
+      '!link <url> [bot|all] — rate-limited chat repeat',
+      '!spamtext <message> [bot|all] — rate-limited chat repeat',
+      '!msgspam <player> <message> [bot|all] — rate-limited whisper repeat',
       '!stoplink [bot|all]',
       '!stopspam [bot|all]',
     ],
@@ -280,9 +292,9 @@ const COMMAND_REFERENCE = [
   {
     group: 'Items / blocks',
     lines: [
-      '!mine <block> [bot|all] â€” repeatedly find the nearest matching block',
+      '!mine <block> [bot|all] — repeatedly find the nearest matching block',
       '!stopmine [bot|all]',
-      '!dig [block] [bot|all] â€” repeatedly mine a block type, or cursor target when no block is given',
+      '!dig [block] [bot|all] — repeatedly mine a block type, or cursor target when no block is given',
       '!armor [bot|all]',
       '!drop [bot|all]',
       '!dropall [bot|all]',
@@ -337,7 +349,7 @@ function handleCommand(username, message) {
     const online = botNames.filter((name) => botStatus[name] === 'online').length;
     const onlineNames = botNames.filter((name) => botStatus[name] === 'online');
     const text = onlineNames.length
-      ? `Online bots: ${online}/${NUMBER_OF_BOTS} â€” ${onlineNames.join(', ')}`
+      ? `Online bots: ${online}/${NUMBER_OF_BOTS} — ${onlineNames.join(', ')}`
       : `Online bots: 0/${NUMBER_OF_BOTS}`;
     const anyBot = Object.values(bots).find((candidate) => candidate?.entity);
     if (anyBot) safeWhisper(anyBot, username, text);
@@ -794,6 +806,10 @@ function setPathGoal(bot, goal, key = '') {
     bot._activeGoalKey = key || null;
     bot._lastPathSetAt = Date.now();
     bot._pathFailures = 0;
+  bot._lastFollowTargetPos = null;
+  bot._lastComeTargetPos = null;
+  bot._lastPhysicsCheckAt = 0;
+  bot._lastTowerAt = 0;
     return true;
   } catch (error) {
     bot._pathFailures = (bot._pathFailures || 0) + 1;
@@ -894,10 +910,195 @@ function repathToPlayer(bot, target, mode = 'follow') {
   );
 }
 
+
+function positionKey(pos) {
+  return `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
+}
+
+function cleanupClaims() {
+  const now = Date.now();
+  for (const [key, claim] of miningClaims) {
+    if (!claim || claim.expires <= now || !bots[claim.botName]?.entity) miningClaims.delete(key);
+  }
+  for (const [key, claim] of placementClaims) {
+    if (!claim || claim.expires <= now || !bots[claim.botName]?.entity) placementClaims.delete(key);
+  }
+}
+
+function otherBotNearPosition(bot, pos, radius = BOT_COLLISION_RADIUS) {
+  const r2 = radius * radius;
+  for (const other of Object.values(bots)) {
+    if (!other || other === bot || !other.entity) continue;
+    if (other.entity.position.distanceTo(pos) <= radius) return true;
+  }
+  return false;
+}
+
+function getMiningClaimOwner(pos) {
+  cleanupClaims();
+  return miningClaims.get(positionKey(pos))?.botName || null;
+}
+
+function claimMiningBlock(bot, block) {
+  if (!block) return false;
+  cleanupClaims();
+  const key = positionKey(block.position);
+  const existing = miningClaims.get(key);
+  if (existing && existing.botName !== bot.username) return false;
+  miningClaims.set(key, { botName: bot.username, expires: Date.now() + CLAIM_TTL_MS });
+  bot._miningClaimKey = key;
+  return true;
+}
+
+function releaseMiningClaim(bot) {
+  if (!bot?._miningClaimKey) return;
+  const claim = miningClaims.get(bot._miningClaimKey);
+  if (!claim || claim.botName === bot.username) miningClaims.delete(bot._miningClaimKey);
+  bot._miningClaimKey = null;
+}
+
+function claimPlacementSpot(bot, pos) {
+  if (!pos) return false;
+  cleanupClaims();
+  const key = positionKey(pos);
+  const existing = placementClaims.get(key);
+  if (existing && existing.botName !== bot.username) return false;
+  if (otherBotNearPosition(bot, pos, BOT_COLLISION_RADIUS)) return false;
+  placementClaims.set(key, { botName: bot.username, expires: Date.now() + CLAIM_TTL_MS });
+  bot._placementClaimKey = key;
+  return true;
+}
+
+function releasePlacementClaim(bot) {
+  if (!bot?._placementClaimKey) return;
+  const claim = placementClaims.get(bot._placementClaimKey);
+  if (!claim || claim.botName === bot.username) placementClaims.delete(bot._placementClaimKey);
+  bot._placementClaimKey = null;
+  bot._buildingBusy = false;
+  bot._digBusy = false;
+}
+
+
+function getNearestOtherBot(bot, maxDistance = 2.5) {
+  if (!bot?.entity) return null;
+  let nearest = null;
+  let nearestDistance = maxDistance;
+  for (const other of Object.values(bots)) {
+    if (!other || other === bot || !other.entity) continue;
+    const distance = bot.entity.position.distanceTo(other.entity.position);
+    if (distance < nearestDistance) {
+      nearest = other;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function isBotAhead(bot, other, maxDistance = 2.5) {
+  if (!bot?.entity || !other?.entity) return false;
+  const dx = other.entity.position.x - bot.entity.position.x;
+  const dz = other.entity.position.z - bot.entity.position.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance > maxDistance || distance < 0.01) return false;
+  const yaw = bot.entity.yaw;
+  const fx = -Math.sin(yaw);
+  const fz = -Math.cos(yaw);
+  return (dx * fx + dz * fz) > distance * 0.45;
+}
+
+async function stepAroundBot(bot, other) {
+  if (!bot?.entity || !other?.entity || bot._buildingBusy || bot._digBusy) return false;
+  const dx = other.entity.position.x - bot.entity.position.x;
+  const dz = other.entity.position.z - bot.entity.position.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const leftX = -dz / len;
+  const leftZ = dx / len;
+  const rightX = -leftX;
+  const rightZ = -leftZ;
+
+  // Prefer the side with more empty space.
+  const base = bot.entity.position.floored();
+  const leftBlock = bot.blockAt(new Vec3(Math.floor(base.x + leftX), base.y, Math.floor(base.z + leftZ)));
+  const rightBlock = bot.blockAt(new Vec3(Math.floor(base.x + rightX), base.y, Math.floor(base.z + rightZ)));
+  const leftOpen = isPassableBlock(leftBlock);
+  const rightOpen = isPassableBlock(rightBlock);
+  const sx = leftOpen ? leftX : rightX;
+  const sz = leftOpen ? leftZ : rightZ;
+  if (!leftOpen && !rightOpen) return false;
+
+  try {
+    bot.setControlState('left', sx === leftX && sz === leftZ);
+    bot.setControlState('right', sx === rightX && sz === rightZ);
+    bot.setControlState('forward', true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return true;
+  } finally {
+    try {
+      bot.setControlState('left', false);
+      bot.setControlState('right', false);
+      bot.setControlState('forward', false);
+    } catch (_) {}
+  }
+}
+
+function getBlockInFront(bot, maxDistance = 3) {
+  if (!bot?.entity) return null;
+  const yaw = bot.entity.yaw;
+  const dx = -Math.sin(yaw);
+  const dz = -Math.cos(yaw);
+  const base = bot.entity.position.floored();
+
+  for (let distance = 1; distance <= maxDistance; distance += 1) {
+    const x = Math.floor(base.x + dx * distance + 0.5);
+    const z = Math.floor(base.z + dz * distance + 0.5);
+    for (const yOffset of [0, 1]) {
+      const block = bot.blockAt(new Vec3(x, base.y + yOffset, z));
+      if (block && block.name !== 'air' && block.boundingBox !== 'empty') return block;
+    }
+  }
+  return null;
+}
+
+function getBuildingBlock(bot) {
+  const preferred = [
+    'cobblestone', 'stone', 'deepslate', 'dirt', 'netherrack',
+    'andesite', 'diorite', 'granite', 'tuff', 'planks', 'sand', 'gravel',
+  ];
+  return bot.inventory.items().find((item) => preferred.some((word) => item.name.includes(word)));
+}
+
+async function safePlaceBlock(bot, reference, faceVector) {
+  if (!bot?.entity || !reference || !faceVector || bot._buildingBusy) return false;
+  const placePos = reference.position.offset(faceVector.x, faceVector.y, faceVector.z);
+  const existing = bot.blockAt(placePos);
+  if (!existing || existing.name !== 'air') return false;
+  if (otherBotNearPosition(bot, placePos, BOT_COLLISION_RADIUS)) return false;
+  if (!claimPlacementSpot(bot, placePos)) return false;
+
+  try {
+    bot._buildingBusy = true;
+    // Re-check immediately before placing because another bot may have filled it.
+    const latest = bot.blockAt(placePos);
+    if (!latest || latest.name !== 'air') return false;
+    await bot.placeBlock(reference, new Vec3(faceVector.x, faceVector.y, faceVector.z));
+    return true;
+  } catch (error) {
+    logConsole(`${bot.username} place-block error: ${error.message}`);
+    return false;
+  } finally {
+    bot._buildingBusy = false;
+    releasePlacementClaim(bot);
+  }
+}
+
 function findNearestMatchingBlock(bot, fragment, maxDistance = 64) {
   const needle = fragment.toLowerCase();
   return bot.findBlock({
-    matching: (block) => block && block.name && block.name.toLowerCase().includes(needle),
+    matching: (block) => {
+      if (!block || !block.name || !block.name.toLowerCase().includes(needle)) return false;
+      const owner = getMiningClaimOwner(block.position);
+      return !owner || owner === bot.username;
+    },
     maxDistance,
   });
 }
@@ -911,8 +1112,14 @@ function isDiggable(bot, block) {
 }
 
 async function digBlockSafely(bot, block) {
-  if (!bot.entity || !block || bot.targetDigBlock) return false;
+  if (!bot.entity || !block || bot.targetDigBlock || bot._digBusy || bot._buildingBusy) return false;
   if (!isDiggable(bot, block)) return false;
+  if (otherBotNearPosition(bot, block.position, BOT_COLLISION_RADIUS)) return false;
+
+  const owner = getMiningClaimOwner(block.position);
+  if (owner && owner !== bot.username) return false;
+  if (!claimMiningBlock(bot, block)) return false;
+  bot._digBusy = true;
 
   try {
     const distance = bot.entity.position.distanceTo(block.position);
@@ -923,56 +1130,84 @@ async function digBlockSafely(bot, block) {
       true
     ).catch(() => {});
 
+    // Await digging so jumping/placing cannot interrupt the dig action.
     await bot.dig(block);
     return true;
   } catch (error) {
     logConsole(`${bot.username} dig error: ${error.message}`);
     return false;
+  } finally {
+    bot._digBusy = false;
+    releaseMiningClaim(bot);
   }
 }
 
-function getBuildingBlock(bot) {
-  const preferred = [
-    'cobblestone', 'stone', 'deepslate', 'dirt', 'netherrack',
-    'andesite', 'diorite', 'granite', 'tuff', 'planks', 'sand', 'gravel',
-  ];
-  return bot.inventory.items().find((item) => preferred.some((word) => item.name.includes(word)));
-}
-
 async function placeBlockBelow(bot) {
-  if (!bot.entity || !bot.entity.onGround) return false;
+  if (!bot?.entity) return false;
   const item = getBuildingBlock(bot);
   if (!item) return false;
 
+  const base = bot.entity.position.floored();
+  // When airborne, place into the empty block directly below the bot.
+  const placePos = base.offset(0, -1, 0);
+  const targetBlock = bot.blockAt(placePos);
+  if (!targetBlock || targetBlock.name !== 'air') return false;
+
+  const reference = bot.blockAt(placePos.offset(0, -1, 0));
+  if (!reference || reference.boundingBox !== 'block') return false;
+  if (otherBotNearPosition(bot, placePos, BOT_COLLISION_RADIUS)) return false;
+
   try {
     await bot.equip(item, 'hand');
-    const reference = bot.blockAt(bot.entity.position.offset(0, -2, 0));
-    if (!reference || reference.name === 'air') return false;
-    await bot.placeBlock(reference, new Vec3(0, 1, 0));
-    return true;
+    return await safePlaceBlock(bot, reference, new Vec3(0, 1, 0));
   } catch (error) {
     logConsole(`${bot.username} place-block error: ${error.message}`);
     return false;
   }
 }
 
-async function breakBlockInFront(bot) {
-  if (!bot.entity || !bot.entity.onGround || bot.targetDigBlock) return false;
+async function towerUpToward(bot, targetY) {
+  if (!bot?.entity || !Number.isFinite(targetY) || bot._buildingBusy || bot._digBusy) return false;
+  const now = Date.now();
+  if (now - (bot._lastTowerAt || 0) < TOWER_COOLDOWN_MS) return false;
+  bot._lastTowerAt = now;
+  if (targetY <= bot.entity.position.y + 1) return false;
+  if (!getBuildingBlock(bot)) return false;
 
-  const yaw = bot.entity.yaw;
-  const dx = -Math.sin(yaw);
-  const dz = -Math.cos(yaw);
+  const base = bot.entity.position.floored();
+  const currentFeet = bot.blockAt(new Vec3(base.x, base.y, base.z));
+  const below = bot.blockAt(new Vec3(base.x, base.y - 1, base.z));
+  const nextSpace = bot.blockAt(new Vec3(base.x, base.y + 1, base.z));
+  if (!below || below.boundingBox !== 'block') return false;
+  if (!nextSpace || nextSpace.name !== 'air') return false;
 
-  for (let distance = 1; distance <= 2.5; distance += 0.5) {
-    const base = bot.entity.position.offset(dx * distance, 0, dz * distance);
-    for (const yOffset of [0, 1]) {
-      const block = bot.blockAt(base.offset(0, yOffset, 0));
-      if (isDiggable(bot, block) && bot.entity.position.distanceTo(block.position) <= 4) {
-        return digBlockSafely(bot, block);
-      }
-    }
+  // Jump first so the bot is not standing inside the space it is trying to fill.
+  try {
+    bot.setControlState('jump', true);
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  } finally {
+    try { bot.setControlState('jump', false); } catch (_) {}
   }
-  return false;
+
+  return placeBlockBelow(bot);
+}
+
+async function breakBlockInFront(bot) {
+  if (!bot?.entity || bot.targetDigBlock) return false;
+
+  const block = getBlockInFront(bot, 3);
+  if (!block || !isDiggable(bot, block)) return false;
+  if (otherBotNearPosition(bot, block.position, BOT_COLLISION_RADIUS)) return false;
+
+  const owner = getMiningClaimOwner(block.position);
+  if (owner && owner !== bot.username) return false;
+  if (!claimMiningBlock(bot, block)) return false;
+
+  try {
+    return await digBlockSafely(bot, block);
+  } finally {
+    releaseMiningClaim(bot);
+  }
 }
 
 function isWaterBlock(block) {
@@ -1054,7 +1289,7 @@ async function recoverFromStuck(bot, targetY) {
   if (!bot?.entity) return;
 
   const now = Date.now();
-  if (now - (bot._lastRecoveryAt || 0) < 2000) return;
+  if (now - (bot._lastRecoveryAt || 0) < RECOVERY_COOLDOWN_MS) return;
   bot._lastRecoveryAt = now;
 
   if (isInLiquid(bot)) {
@@ -1066,23 +1301,30 @@ async function recoverFromStuck(bot, targetY) {
     bot.pathfinder.setGoal(null);
   } catch (_) {}
 
+  const nearestBot = getNearestOtherBot(bot, 2.5);
+  if (nearestBot && isBotAhead(bot, nearestBot, 2.5)) {
+    await stepAroundBot(bot, nearestBot);
+    return;
+  }
+
+  // Never start jumping at the same time as an awaited dig/place action.
+  if (Number.isFinite(targetY) && targetY > bot.entity.position.y + 1.25) {
+    await towerUpToward(bot, targetY);
+    return;
+  }
+
+  const broke = await breakBlockInFront(bot);
+  if (broke) return;
+
   try {
     bot.setControlState('jump', true);
     bot.setControlState('forward', true);
-    setTimeout(() => {
-      try {
-        bot.setControlState('jump', false);
-        bot.setControlState('forward', false);
-      } catch (_) {}
-    }, 400);
-  } catch (_) {}
-
-  if (Number.isFinite(targetY) && targetY > bot.entity.position.y + 1.25) {
-    await placeBlockBelow(bot);
-  } else if (!bot.entity.onGround) {
-    try { bot.setControlState('jump', true); } catch (_) {}
-  } else {
-    await breakBlockInFront(bot);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  } finally {
+    try {
+      bot.setControlState('jump', false);
+      bot.setControlState('forward', false);
+    } catch (_) {}
   }
 }
 
@@ -1123,19 +1365,18 @@ function updateFollow(bot) {
   }
 
   const now = Date.now();
-  const targetKey = `follow:${targetName}:${Math.floor(target.position.x)},${Math.floor(target.position.y)},${Math.floor(target.position.z)}`;
+  if (target.position.y > bot.entity.position.y + 2 && bot._stuckTicks >= 2) {
+    towerUpToward(bot, target.position.y).catch(() => {});
+  }
 
-  // Repath often enough to follow a moving target, but don't thrash the pathfinder every tick.
+  const targetMoved = !bot._lastFollowTargetPos ||
+    bot._lastFollowTargetPos.distanceTo(target.position) >= 1.0;
   if (
-    bot._activeGoalKey !== targetKey &&
-    now - (bot._lastPathSetAt || 0) >= PATH_RETRY_MS
-  ) {
-    repathToPlayer(bot, target, 'follow');
-  } else if (
-    now - (bot._followGoalTime || 0) >= FOLLOW_UPDATE_MS &&
+    (targetMoved || now - (bot._lastPathSetAt || 0) >= PATH_RETRY_MS) &&
     now - (bot._lastPathSetAt || 0) >= FOLLOW_UPDATE_MS
   ) {
     repathToPlayer(bot, target, 'follow');
+    bot._lastFollowTargetPos = target.position.clone();
   }
 
   if (bot._lastPosition) {
@@ -1182,11 +1423,17 @@ function updateCome(bot) {
   }
 
   const now = Date.now();
+  if (target.position.y > bot.entity.position.y + 2 && bot._stuckTicks >= 2) {
+    towerUpToward(bot, target.position.y).catch(() => {});
+  }
+  const targetMoved = !bot._lastComeTargetPos ||
+    bot._lastComeTargetPos.distanceTo(target.position) >= 1.0;
   if (
-    !bot._activeGoalKey?.startsWith(`come:${targetName}:`) ||
+    targetMoved ||
     now - (bot._lastPathSetAt || 0) >= PATH_RETRY_MS
   ) {
     repathToPlayer(bot, target, 'come');
+    bot._lastComeTargetPos = target.position.clone();
   }
 
   if (bot._lastPosition) {
@@ -1245,7 +1492,23 @@ async function updateMining(bot) {
 
   if (!bot.mineBlock || bot.followTarget || bot.comingTo) return;
 
-  const block = findNearestMatchingBlock(bot, bot.mineBlock, 64);
+  let block = findNearestMatchingBlock(bot, bot.mineBlock, 64);
+  if (block) {
+    const owner = getMiningClaimOwner(block.position);
+    if (owner && owner !== bot.username) {
+      // Look for another matching block rather than fighting another bot.
+      const original = block;
+      block = bot.findBlock({
+        matching: (candidate) => {
+          if (!candidate || !candidate.name || !candidate.name.toLowerCase().includes(bot.mineBlock.toLowerCase())) return false;
+          const candidateOwner = getMiningClaimOwner(candidate.position);
+          return !candidateOwner || candidateOwner === bot.username;
+        },
+        maxDistance: 64,
+      });
+      if (block && positionKey(block.position) === positionKey(original.position)) block = null;
+    }
+  }
   if (!block) {
     bot.pathfinder.setGoal(null);
     bot._activeGoalKey = null;
@@ -1299,6 +1562,8 @@ function initializeBotState(bot) {
   bot._digRetries = 0;
   bot._lastPathSetAt = 0;
   bot._pathFailures = 0;
+  bot._miningClaimKey = null;
+  bot._placementClaimKey = null;
   bot.spamLinkInterval = null;
   bot.spamTextInterval = null;
   bot.spamMsgInterval = null;
@@ -1342,6 +1607,10 @@ function initializeBotState(bot) {
     if (!bot.entity || !bot.pathfinder.isMoving()) return;
     if (!bot.followTarget && !bot.comingTo) return;
 
+    const now = Date.now();
+    if (now - (bot._lastPhysicsCheckAt || 0) < 500) return;
+    bot._lastPhysicsCheckAt = now;
+
     const target = bot.followTarget
       ? bot.players[bot.followTarget]?.entity
       : bot.players[bot.comingTo]?.entity;
@@ -1355,27 +1624,8 @@ function initializeBotState(bot) {
     bot._lastPosition = bot.entity.position.clone();
 
     if (bot._stuckTicks > 60) {
-      bot.pathfinder.setGoal(null);
       bot._stuckTicks = 0;
-
-      try {
-        bot.setControlState('jump', true);
-      } catch (_) {}
-
-      setTimeout(() => {
-        try {
-          bot.setControlState('jump', false);
-        } catch (_) {}
-
-        if (!bot.entity || !target.isValid) return;
-
-        try {
-          bot.pathfinder.setGoal(
-            new goals.GoalNear(target.position.x, target.position.y, target.position.z, 2),
-            true
-          );
-        } catch (_) {}
-      }, 500);
+      recoverFromStuck(bot, target.position.y).catch(() => {});
     }
   };
 
@@ -1383,6 +1633,10 @@ function initializeBotState(bot) {
 }
 
 function cleanupBot(bot) {
+  bot._buildingBusy = false;
+  bot._digBusy = false;
+  releaseMiningClaim(bot);
+  releasePlacementClaim(bot);
   clearIntervalSafe(bot, 'followInterval');
   clearIntervalSafe(bot, 'comeInterval');
   clearIntervalSafe(bot, 'mineInterval');
@@ -1704,14 +1958,14 @@ app.get('/', (_req, res) => {
         <h1>CloudAFK Bot Army</h1>
         <p>Live control dashboard for your Minecraft bot fleet</p>
       </div>
-      <div class="server-badge"><span id="mcDot" class="dot checking"></span><span id="mcStatus">Checking Minecraftâ€¦</span><span id="mcLatency">â€”</span></div>
+      <div class="server-badge"><span id="mcDot" class="dot checking"></span><span id="mcStatus">Checking Minecraft…</span><span id="mcLatency">—</span></div>
     </header>
 
     <section class="grid">
       <div class="card stat"><h3>Bots online</h3><div class="value" id="onlineCount">0 / ${NUMBER_OF_BOTS}</div><div class="sub">Connected bot instances</div></div>
       <div class="card stat"><h3>Dashboard uptime</h3><div class="value" id="uptime">0s</div><div class="sub">This Node.js process</div></div>
       <div class="card stat"><h3>Commands</h3><div class="value" id="commandCount">0</div><div class="sub">Commands executed</div></div>
-      <div class="card stat"><h3>MC server</h3><div class="value" id="mcStateText">Checking</div><div class="sub" id="mcChecked">Waiting for first checkâ€¦</div></div>
+      <div class="card stat"><h3>MC server</h3><div class="value" id="mcStateText">Checking</div><div class="sub" id="mcChecked">Waiting for first check…</div></div>
     </section>
 
     <section class="section">
@@ -1731,7 +1985,7 @@ app.get('/', (_req, res) => {
       <div class="section-title"><h2>Bot console</h2><span>Live logs</span></div>
       <div class="console" id="botConsole"></div>
       <form action="/api/botcommand" method="POST" class="form-row">
-        <input type="text" name="command" placeholder="Bot commandâ€¦ !follow tcl all" required>
+        <input type="text" name="command" placeholder="Bot command… !follow tcl all" required>
         <button type="submit">Send bot command</button>
       </form>
     </section>
@@ -1740,12 +1994,12 @@ app.get('/', (_req, res) => {
       <div class="section-title"><h2>Minecraft console</h2><span>Send to connected bots</span></div>
       <div class="console" id="mcConsole"></div>
       <form action="/api/mccommand" method="POST" class="form-row">
-        <input type="text" name="command" placeholder="MC commandâ€¦ /time set day" required>
+        <input type="text" name="command" placeholder="MC command… /time set day" required>
         <button type="submit">Send MC command</button>
       </form>
     </section>
 
-    <div class="footer">CloudAFK â€¢ ${config.host}:${config.port} â€¢ Minecraft ${config.version}</div>
+    <div class="footer">CloudAFK • ${config.host}:${config.port} • Minecraft ${config.version}</div>
   </div>
 
   <script>
@@ -1777,17 +2031,17 @@ app.get('/', (_req, res) => {
       const mc = data.mcServer || { status: 'checking' };
       const dot = document.getElementById('mcDot');
       dot.className = 'dot ' + escapeHtml(mc.status);
-      document.getElementById('mcStatus').textContent = mc.status === 'online' ? 'Minecraft OPEN' : (mc.status === 'offline' ? 'Minecraft OFFLINE' : 'Checking Minecraftâ€¦');
+      document.getElementById('mcStatus').textContent = mc.status === 'online' ? 'Minecraft OPEN' : (mc.status === 'offline' ? 'Minecraft OFFLINE' : 'Checking Minecraft…');
       document.getElementById('mcStateText').textContent = mc.status === 'online' ? 'OPEN' : (mc.status === 'offline' ? 'OFFLINE' : 'CHECKING');
       document.getElementById('mcLatency').textContent = mc.status === 'online' && Number.isFinite(mc.latency) ? mc.latency + ' ms' : '';
-      document.getElementById('mcChecked').textContent = mc.lastChecked ? ('Last check: ' + new Date(mc.lastChecked).toLocaleTimeString()) : 'Waiting for first checkâ€¦';
+      document.getElementById('mcChecked').textContent = mc.lastChecked ? ('Last check: ' + new Date(mc.lastChecked).toLocaleTimeString()) : 'Waiting for first check…';
 
       document.getElementById('botCards').innerHTML = data.botCards.map((bot) => {
         const live = bot.status === 'online';
         return '<div class="card bot-card">' +
           '<div class="bot-head"><div class="bot-name">' + escapeHtml(bot.name) + '</div><div class="pill ' + escapeHtml(bot.status) + '">' + escapeHtml(bot.status) + '</div></div>' +
           '<div class="playtime" data-playtime-name="' + escapeHtml(bot.name) + '">' + escapeHtml(bot.playtime) + '</div>' +
-          '<div class="play-label">Total playtime' + (live ? ' â€¢ LIVE' : '') + '</div>' +
+          '<div class="play-label">Total playtime' + (live ? ' • LIVE' : '') + '</div>' +
           '</div>';
       }).join('');
 
