@@ -28,6 +28,7 @@ const botNames = [
 
 const NUMBER_OF_BOTS = botNames.length;
 const PORT = process.env.PORT || 3000;
+const BOT_ACTION_STAGGER_MS = 180;
 
 const RECONNECT_BASE_MS = 5000;
 const RECONNECT_MAX_MS = 60000;
@@ -44,8 +45,8 @@ const WATER_RECOVERY_MS = 1000;
 const PATH_RETRY_MS = 2500;
 const FOLLOW_DISTANCE = 2.2;
 const COME_DISTANCE = 2.0;
-const DUPLICATE_WINDOW_MS = 1500;
 const SPAM_INTERVAL_MS = 1000;
+const DUPLICATE_COMMAND_WINDOW_MS = 1500;
 
 const bots = Object.create(null);
 const botStatus = Object.create(null);
@@ -84,18 +85,6 @@ function pickNewLeaderIfNeeded() {
   commandLeaderUsername = botNames.find((name) => botStatus[name] === 'online') || null;
 }
 
-function isDuplicate(username, message) {
-  const key = `${username.toLowerCase()}::${message}`;
-  const now = Date.now();
-  const last = recentCommands.get(key);
-  if (last && now - last < DUPLICATE_WINDOW_MS) return true;
-  recentCommands.set(key, now);
-
-  for (const [k, t] of recentCommands) {
-    if (now - t > DUPLICATE_WINDOW_MS * 5) recentCommands.delete(k);
-  }
-  return false;
-}
 
 function getBotNamesForTargeting() {
   return ['all', ...botNames.map((name) => name.toLowerCase())];
@@ -329,7 +318,21 @@ function sendHelp(username) {
 function handleCommand(username, message) {
   if (!username || !myUsername.includes(username.toLowerCase())) return;
   if (typeof message !== 'string' || !message.trim()) return;
-  if (isDuplicate(username, message)) return;
+
+  const normalizedMessage = message.trim().replace(/\s+/g, ' ').toLowerCase();
+  const duplicateKey = `${username.toLowerCase()}:${normalizedMessage}`;
+  const now = Date.now();
+  const lastSeen = recentCommands.get(duplicateKey) || 0;
+
+  if (now - lastSeen < DUPLICATE_COMMAND_WINDOW_MS) return;
+  recentCommands.set(duplicateKey, now);
+
+  // Keep this map small if many different messages arrive over time.
+  if (recentCommands.size > 200) {
+    for (const [key, timestamp] of recentCommands) {
+      if (now - timestamp > DUPLICATE_COMMAND_WINDOW_MS) recentCommands.delete(key);
+    }
+  }
 
   totalCommandsExecuted += 1;
   commandHistory.push(`[${new Date().toLocaleTimeString()}] ${username}: ${message}`);
@@ -382,7 +385,9 @@ function executeCommand(bot, username, args, command) {
     }
 
     if (command === '!ping') {
-      safeWhisper(bot, username, `${botName} Ping: ${bot.player?.ping ?? 'unknown'}ms`);
+      const serverPing = Number.isFinite(mcServerState.latency) ? `${mcServerState.latency}ms to server` : 'server RTT unavailable';
+      const mineflayerPing = Number.isFinite(bot.player?.ping) ? `${bot.player.ping}ms (Mineflayer)` : 'Mineflayer ping unavailable';
+      safeWhisper(bot, username, `${botName} Ping: ${serverPing}; ${mineflayerPing}`);
       return;
     }
 
@@ -1598,9 +1603,11 @@ function initializeBotState(bot) {
     bot._pathfinderPhysicsTick = null;
   }
 
-  bot.followInterval = setInterval(() => updateFollow(bot), FOLLOW_UPDATE_MS);
-  bot.comeInterval = setInterval(() => updateCome(bot), COME_UPDATE_MS);
-  bot.mineInterval = setInterval(() => updateMining(bot).catch(() => {}), MINE_UPDATE_MS);
+  const botIndex = botNames.indexOf(bot.username);
+  const actionOffset = Math.max(0, botIndex) * BOT_ACTION_STAGGER_MS;
+  bot.followInterval = setInterval(() => updateFollow(bot), FOLLOW_UPDATE_MS + actionOffset);
+  bot.comeInterval = setInterval(() => updateCome(bot), COME_UPDATE_MS + actionOffset);
+  bot.mineInterval = setInterval(() => updateMining(bot).catch(() => {}), MINE_UPDATE_MS + actionOffset);
   bot.lookInterval = setInterval(() => updateLookAt(bot), LOOK_UPDATE_MS);
 
   bot._pathfinderPhysicsTick = () => {
@@ -1794,7 +1801,7 @@ function probeMinecraftServer() {
 
 function startMinecraftProbe() {
   probeMinecraftServer();
-  setInterval(probeMinecraftServer, 5000);
+  setInterval(probeMinecraftServer, 10000);
 }
 
 app.get('/api/status', (_req, res) => {
@@ -2040,7 +2047,7 @@ app.get('/', (_req, res) => {
         const live = bot.status === 'online';
         return '<div class="card bot-card">' +
           '<div class="bot-head"><div class="bot-name">' + escapeHtml(bot.name) + '</div><div class="pill ' + escapeHtml(bot.status) + '">' + escapeHtml(bot.status) + '</div></div>' +
-          '<div class="playtime" data-playtime-name="' + escapeHtml(bot.name) + '">' + escapeHtml(bot.playtime) + '</div>' +
+          '<div class="playtime" data-playtime-name="' + escapeHtml(bot.name) + '" data-playtime-ms="' + bot.playtimeMs + '" data-live="' + (live ? '1' : '0') + '">' + escapeHtml(bot.playtime) + '</div>' +
           '<div class="play-label">Total playtime' + (live ? ' • LIVE' : '') + '</div>' +
           '</div>';
       }).join('');
