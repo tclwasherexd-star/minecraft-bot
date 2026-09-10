@@ -32,17 +32,17 @@ const BOT_ACTION_STAGGER_MS = 180;
 
 const RECONNECT_BASE_MS = 5000;
 const RECONNECT_MAX_MS = 60000;
-const FOLLOW_UPDATE_MS = 750;
-const COME_UPDATE_MS = 750;
-const MINE_UPDATE_MS = 900;
-const LOOK_UPDATE_MS = 300;
+const FOLLOW_UPDATE_MS = 1000;
+const COME_UPDATE_MS = 1000;
+const MINE_UPDATE_MS = 1200;
+const LOOK_UPDATE_MS = 400;
 const STUCK_CHECK_MS = 1000;
 const STUCK_DISTANCE = 0.08;
 const STUCK_LIMIT = 4;
 const RECOVERY_COOLDOWN_MS = 2500;
 const TOWER_COOLDOWN_MS = 1200;
 const WATER_RECOVERY_MS = 1000;
-const PATH_RETRY_MS = 2500;
+const PATH_RETRY_MS = 3000;
 const FOLLOW_DISTANCE = 2.2;
 const COME_DISTANCE = 2.0;
 const SPAM_INTERVAL_MS = 1000;
@@ -59,7 +59,7 @@ const commandHistory = [];
 const mcConsoleLogs = [];
 const consoleLogs = [];
 let commandLeaderUsername = null;
-const mcServerState = { status: 'checking', latency: null, lastChecked: 0, error: '' };
+const mcServerState = { status: 'checking', latency: null, avgLatency: null, minLatency: null, maxLatency: null, samples: [], lastChecked: 0, error: '' };
 let mcProbeInFlight = false;
 const recentCommands = new Map();
 
@@ -811,10 +811,6 @@ function setPathGoal(bot, goal, key = '') {
     bot._activeGoalKey = key || null;
     bot._lastPathSetAt = Date.now();
     bot._pathFailures = 0;
-  bot._lastFollowTargetPos = null;
-  bot._lastComeTargetPos = null;
-  bot._lastPhysicsCheckAt = 0;
-  bot._lastTowerAt = 0;
     return true;
   } catch (error) {
     bot._pathFailures = (bot._pathFailures || 0) + 1;
@@ -1375,10 +1371,11 @@ function updateFollow(bot) {
   }
 
   const targetMoved = !bot._lastFollowTargetPos ||
-    bot._lastFollowTargetPos.distanceTo(target.position) >= 1.0;
+    bot._lastFollowTargetPos.distanceTo(target.position) >= 2.5;
   if (
     (targetMoved || now - (bot._lastPathSetAt || 0) >= PATH_RETRY_MS) &&
-    now - (bot._lastPathSetAt || 0) >= FOLLOW_UPDATE_MS
+    now - (bot._lastPathSetAt || 0) >= FOLLOW_UPDATE_MS &&
+    (!bot._activeGoalKey || now - (bot._lastPathSetAt || 0) >= PATH_RETRY_MS || targetMoved)
   ) {
     repathToPlayer(bot, target, 'follow');
     bot._lastFollowTargetPos = target.position.clone();
@@ -1432,7 +1429,7 @@ function updateCome(bot) {
     towerUpToward(bot, target.position.y).catch(() => {});
   }
   const targetMoved = !bot._lastComeTargetPos ||
-    bot._lastComeTargetPos.distanceTo(target.position) >= 1.0;
+    bot._lastComeTargetPos.distanceTo(target.position) >= 2.0;
   if (
     targetMoved ||
     now - (bot._lastPathSetAt || 0) >= PATH_RETRY_MS
@@ -1608,7 +1605,7 @@ function initializeBotState(bot) {
   bot.followInterval = setInterval(() => updateFollow(bot), FOLLOW_UPDATE_MS + actionOffset);
   bot.comeInterval = setInterval(() => updateCome(bot), COME_UPDATE_MS + actionOffset);
   bot.mineInterval = setInterval(() => updateMining(bot).catch(() => {}), MINE_UPDATE_MS + actionOffset);
-  bot.lookInterval = setInterval(() => updateLookAt(bot), LOOK_UPDATE_MS);
+  bot.lookInterval = setInterval(() => updateLookAt(bot), LOOK_UPDATE_MS + actionOffset);
 
   bot._pathfinderPhysicsTick = () => {
     if (!bot.entity || !bot.pathfinder.isMoving()) return;
@@ -1782,6 +1779,13 @@ function probeMinecraftServer() {
     try { socket.destroy(); } catch (_) {}
     mcServerState.status = status;
     mcServerState.latency = status === 'online' ? Date.now() - started : null;
+    if (status === 'online' && Number.isFinite(mcServerState.latency)) {
+      mcServerState.samples.push(mcServerState.latency);
+      if (mcServerState.samples.length > 10) mcServerState.samples.shift();
+      mcServerState.avgLatency = Math.round(mcServerState.samples.reduce((a, b) => a + b, 0) / mcServerState.samples.length);
+      mcServerState.minLatency = Math.min(...mcServerState.samples);
+      mcServerState.maxLatency = Math.max(...mcServerState.samples);
+    }
     mcServerState.lastChecked = Date.now();
     mcServerState.error = error || '';
     mcProbeInFlight = false;
@@ -1835,6 +1839,10 @@ app.get('/api/status', (_req, res) => {
     mcServer: {
       status: mcServerState.status,
       latency: mcServerState.latency,
+      avgLatency: mcServerState.avgLatency,
+      minLatency: mcServerState.minLatency,
+      maxLatency: mcServerState.maxLatency,
+      samples: mcServerState.samples,
       lastChecked: mcServerState.lastChecked,
       error: mcServerState.error,
     },
@@ -2040,8 +2048,8 @@ app.get('/', (_req, res) => {
       dot.className = 'dot ' + escapeHtml(mc.status);
       document.getElementById('mcStatus').textContent = mc.status === 'online' ? 'Minecraft OPEN' : (mc.status === 'offline' ? 'Minecraft OFFLINE' : 'Checking Minecraft…');
       document.getElementById('mcStateText').textContent = mc.status === 'online' ? 'OPEN' : (mc.status === 'offline' ? 'OFFLINE' : 'CHECKING');
-      document.getElementById('mcLatency').textContent = mc.status === 'online' && Number.isFinite(mc.latency) ? mc.latency + ' ms' : '';
-      document.getElementById('mcChecked').textContent = mc.lastChecked ? ('Last check: ' + new Date(mc.lastChecked).toLocaleTimeString()) : 'Waiting for first check…';
+      document.getElementById('mcLatency').textContent = mc.status === 'online' && Number.isFinite(mc.avgLatency) ? 'avg ' + mc.avgLatency + ' ms' : '';
+      document.getElementById('mcChecked').textContent = mc.lastChecked ? ('Last check: ' + new Date(mc.lastChecked).toLocaleTimeString() + (Number.isFinite(mc.latency) ? ' • latest ' + mc.latency + ' ms' : '')) : 'Waiting for first check…';
 
       document.getElementById('botCards').innerHTML = data.botCards.map((bot) => {
         const live = bot.status === 'online';
