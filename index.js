@@ -112,9 +112,12 @@ function getTargetBots(botArg) {
 
 function safeWhisper(bot, target, text) {
   try {
-    if (bot?.entity) bot.whisper(target, String(text));
+    if (!bot?.entity || !target) return;
+    const message = String(text).replace(/[\r\n]+/g, ' ').trim();
+    if (!message) return;
+    bot.chat(`/msg ${target} ${message}`);
   } catch (error) {
-    logConsole(`${bot?.username || 'bot'} whisper error: ${error.message}`);
+    logConsole(`${bot?.username || 'bot'} /msg error: ${error.message}`);
   }
 }
 
@@ -139,6 +142,7 @@ function clearMovement(bot) {
   bot.mineBlock = null;
   bot.digTarget = null;
   bot.lookAtTarget = null;
+  bot._gotoTarget = null;
   bot._activeGoalKey = null;
   bot._followGoalTime = 0;
   bot._lastMineBlockKey = null;
@@ -157,6 +161,7 @@ function stopOnlyMovement(bot) {
   bot.comingTo = null;
   bot.mineBlock = null;
   bot.digTarget = null;
+  bot._gotoTarget = null;
   bot._activeGoalKey = null;
   bot._followGoalTime = 0;
   bot._lastMineBlockKey = null;
@@ -479,6 +484,7 @@ function executeCommand(bot, username, args, command) {
       const z = Number.parseFloat(args[3]);
       if ([x, y, z].every(Number.isFinite)) {
         clearMovement(bot);
+        bot._gotoTarget = new Vec3(x, y, z);
         setPathGoal(bot, new goals.GoalNear(x, y, z, 1), `goto:${x},${y},${z}`);
         safeWhisper(bot, username, `${botName} walking to ${x},${y},${z}!`);
       } else {
@@ -680,6 +686,7 @@ function executeCommand(bot, username, args, command) {
     }
 
     if (command === '!stopmine') {
+      bot._gotoTarget = null;
       bot.mineBlock = null;
       bot.digTarget = null;
       bot._lastMineBlockKey = null;
@@ -811,6 +818,8 @@ function setPathGoal(bot, goal, key = '') {
     bot._activeGoalKey = key || null;
     bot._lastPathSetAt = Date.now();
     bot._pathFailures = 0;
+  bot._lastManualJumpAt = 0;
+  bot._manualJumping = false;
   bot._lastManualJumpAt = 0;
   bot._manualJumping = false;
     return true;
@@ -1065,50 +1074,50 @@ function getBlockInFront(bot, maxDistance = 3) {
 
 function tryJumpOneBlock(bot, target) {
   if (!bot?.entity || !target || bot._manualJumping) return false;
-  if (bot._buildingBusy || bot._digBusy) return false;
-  if (isInLiquid(bot)) return false;
+  if (bot._buildingBusy || bot._digBusy || isInLiquid(bot)) return false;
+
   const now = Date.now();
-  if (now - (bot._lastManualJumpAt || 0) < 1200) return false;
+  if (now - (bot._lastManualJumpAt || 0) < 900) return false;
 
   const dx = target.position.x - bot.entity.position.x;
   const dz = target.position.z - bot.entity.position.z;
   const horizontal = Math.hypot(dx, dz);
-  if (horizontal < 0.8 || horizontal > 4.2) return false;
+  if (horizontal < 0.6) return false;
 
   const ux = dx / horizontal;
   const uz = dz / horizontal;
   const base = bot.entity.position.floored();
 
-  // Look one block ahead in the direction of the target. If it is a
-  // one-block-high solid obstacle with two clear spaces above it, jump it.
-  const obstacle = bot.blockAt(new Vec3(
-    Math.floor(base.x + ux + 0.5),
-    base.y,
-    Math.floor(base.z + uz + 0.5)
-  ));
-  const head = bot.blockAt(new Vec3(
-    obstacle?.position.x ?? 0,
-    base.y + 1,
-    obstacle?.position.z ?? 0
-  ));
-  const above = bot.blockAt(new Vec3(
-    obstacle?.position.x ?? 0,
-    base.y + 2,
-    obstacle?.position.z ?? 0
-  ));
+  // Check several points ahead. This catches a one-block step even when
+  // the bot is not looking directly at the obstacle.
+  let obstacle = null;
+  for (const ahead of [0.8, 1.1, 1.4]) {
+    const x = Math.floor(bot.entity.position.x + ux * ahead);
+    const z = Math.floor(bot.entity.position.z + uz * ahead);
+    const block = bot.blockAt(new Vec3(x, base.y, z));
+    const head = bot.blockAt(new Vec3(x, base.y + 1, z));
+    const aboveHead = bot.blockAt(new Vec3(x, base.y + 2, z));
 
-  if (!obstacle || obstacle.boundingBox === 'empty') return false;
-  if (!head || head.boundingBox !== 'empty') return false;
-  if (!above || above.boundingBox !== 'empty') return false;
+    if (
+      block && block.boundingBox !== 'empty' &&
+      head && head.boundingBox === 'empty' &&
+      aboveHead && aboveHead.boundingBox === 'empty'
+    ) {
+      obstacle = block;
+      break;
+    }
+  }
+
+  if (!obstacle) return false;
 
   const nearestBot = getNearestOtherBot(bot, 2.2);
   if (nearestBot && isBotAhead(bot, nearestBot, 2.2)) return false;
 
+  // Let Pathfinder keep its active goal. We only add a short jump input.
   bot._lastManualJumpAt = now;
   bot._manualJumping = true;
 
   try {
-    bot.pathfinder.setGoal(null);
     bot.setControlState('forward', true);
     bot.setControlState('sprint', true);
     bot.setControlState('jump', true);
@@ -1120,25 +1129,8 @@ function tryJumpOneBlock(bot, target) {
       bot.setControlState('forward', false);
       bot.setControlState('sprint', false);
     } catch (_) {}
-
     bot._manualJumping = false;
-
-    if (!bot.entity) return;
-    const freshTarget = bot.followTarget
-      ? bot.players[bot.followTarget]?.entity
-      : bot.comingTo
-        ? bot.players[bot.comingTo]?.entity
-        : null;
-    if (!freshTarget) return;
-
-    try {
-      if (bot.followTarget) {
-        repathToPlayer(bot, freshTarget, 'follow');
-      } else if (bot.comingTo) {
-        repathToPlayer(bot, freshTarget, 'come');
-      }
-    } catch (_) {}
-  }, 650);
+  }, 450);
 
   return true;
 }
@@ -1157,18 +1149,10 @@ async function safePlaceBlock(bot, reference, faceVector) {
   const existing = bot.blockAt(placePos);
   if (!existing || existing.name !== 'air') return false;
   if (otherBotNearPosition(bot, placePos, BOT_COLLISION_RADIUS)) return false;
-  if (!claimPlacementSpot(bot, placePos)) return false;
-
+  bot._buildingBusy = true;
   try {
-    bot._buildingBusy = true;
-    // Re-check immediately before placing because another bot may have filled it.
-    const latest = bot.blockAt(placePos);
-    if (!latest || latest.name !== 'air') return false;
-    await bot.placeBlock(reference, new Vec3(faceVector.x, faceVector.y, faceVector.z));
+    await bot.placeBlock(reference, faceVector);
     return true;
-  } catch (error) {
-    logConsole(`${bot.username} place-block error: ${error.message}`);
-    return false;
   } finally {
     bot._buildingBusy = false;
     releasePlacementClaim(bot);
@@ -1417,6 +1401,29 @@ function resetStuckTracking(bot) {
   bot._stuckTicks = 0;
 }
 
+function getActiveMovementTarget(bot) {
+  if (!bot?.entity) return null;
+  if (bot.followTarget) {
+    const name = normalizePlayerName(bot, bot.followTarget);
+    return name ? bot.players[name]?.entity || null : null;
+  }
+  if (bot.comingTo) {
+    const name = normalizePlayerName(bot, bot.comingTo);
+    return name ? bot.players[name]?.entity || null : null;
+  }
+  if (bot._gotoTarget) return { position: bot._gotoTarget, height: 1.8 };
+  if (bot.digTarget) return { position: bot.digTarget, height: 1.8 };
+  return null;
+}
+
+function assistOneBlockJumpForAnyGoal(bot) {
+  if (!bot?.entity || !bot.pathfinder?.isMoving()) return false;
+  if (bot._digBusy || bot._buildingBusy || bot.targetDigBlock || bot._manualJumping) return false;
+  const target = getActiveMovementTarget(bot);
+  if (!target?.position) return false;
+  return tryJumpOneBlock(bot, target);
+}
+
 function updateFollow(bot) {
   if (!bot.entity || !bot.followTarget) {
     if (bot._activeGoalKey?.startsWith('follow:')) {
@@ -1448,7 +1455,7 @@ function updateFollow(bot) {
     }
   }
 
-  if (tryJumpOneBlock(bot, target)) return;
+  if (assistOneBlockJumpForAnyGoal(bot)) return;
 
   const now = Date.now();
   if (target.position.y > bot.entity.position.y + 2 && bot._stuckTicks >= 2) {
@@ -1496,6 +1503,8 @@ function updateCome(bot) {
   bot.comingTo = targetName;
   const distance = bot.entity.position.distanceTo(target.position);
 
+  if (assistOneBlockJumpForAnyGoal(bot)) return;
+
   if (distance <= COME_DISTANCE) {
     clearPathGoal(bot);
     bot.clearControlStates();
@@ -1509,7 +1518,7 @@ function updateCome(bot) {
     return;
   }
 
-  if (tryJumpOneBlock(bot, target)) return;
+  if (assistOneBlockJumpForAnyGoal(bot)) return;
 
   const now = Date.now();
   if (target.position.y > bot.entity.position.y + 2 && bot._stuckTicks >= 2) {
@@ -1553,6 +1562,8 @@ async function updateMining(bot) {
 
     const distance = bot.entity.position.distanceTo(block.position);
     const key = `digTarget:${block.position.x},${block.position.y},${block.position.z}`;
+
+    if (distance > 4.0 && assistOneBlockJumpForAnyGoal()) return;
 
     if (distance <= 4.0) {
       bot.pathfinder.setGoal(null);
@@ -1607,6 +1618,8 @@ async function updateMining(bot) {
   const distance = bot.entity.position.distanceTo(block.position);
   const key = `mine:${bot.mineBlock}:${block.position.x},${block.position.y},${block.position.z}`;
 
+  if (distance > 4.0) assistOneBlockJumpForAnyGoal(bot);
+
   if (distance <= 4.0) {
     bot.pathfinder.setGoal(null);
     bot._activeGoalKey = key;
@@ -1641,6 +1654,7 @@ function initializeBotState(bot) {
   bot.mineBlock = null;
   bot.digTarget = null;
   bot.lookAtTarget = null;
+  bot._gotoTarget = null;
   bot._activeGoalKey = null;
   bot._followGoalTime = 0;
   bot._lastMineBlockKey = null;
@@ -1662,6 +1676,8 @@ function initializeBotState(bot) {
   moves.canSwim = false;
   moves.allowParkour = true;
   moves.allowSprinting = true;
+  moves.maxDropDown = 3;
+  moves.canJump = true;
 
   // Let pathfinder break blocking terrain and build upward when needed.
   moves.canDig = true;
@@ -1696,15 +1712,15 @@ function initializeBotState(bot) {
 
   bot._pathfinderPhysicsTick = () => {
     if (!bot.entity || !bot.pathfinder.isMoving()) return;
-    if (!bot.followTarget && !bot.comingTo) return;
 
     const now = Date.now();
     if (now - (bot._lastPhysicsCheckAt || 0) < 500) return;
     bot._lastPhysicsCheckAt = now;
 
-    const target = bot.followTarget
-      ? bot.players[bot.followTarget]?.entity
-      : bot.players[bot.comingTo]?.entity;
+    // Apply the same one-block jump assistance to follow, come, goto, mine and dig.
+    assistOneBlockJumpForAnyGoal(bot);
+
+    const target = getActiveMovementTarget(bot);
     if (!target) return;
 
     if (bot._lastPosition) {
