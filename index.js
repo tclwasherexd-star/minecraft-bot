@@ -1077,60 +1077,54 @@ function tryJumpOneBlock(bot, target) {
   if (bot._buildingBusy || bot._digBusy || isInLiquid(bot)) return false;
 
   const now = Date.now();
-  if (now - (bot._lastManualJumpAt || 0) < 900) return false;
+  if (now - (bot._lastManualJumpAt || 0) < 700) return false;
 
   const dx = target.position.x - bot.entity.position.x;
   const dz = target.position.z - bot.entity.position.z;
   const horizontal = Math.hypot(dx, dz);
-  if (horizontal < 0.6) return false;
+  if (horizontal < 0.5) return false;
 
   const ux = dx / horizontal;
   const uz = dz / horizontal;
   const base = bot.entity.position.floored();
 
-  // Check several points ahead. This catches a one-block step even when
-  // the bot is not looking directly at the obstacle.
+  // Look for a solid one-block step directly along the route.
   let obstacle = null;
-  for (const ahead of [0.8, 1.1, 1.4]) {
+  for (const ahead of [0.65, 0.9, 1.15, 1.4]) {
     const x = Math.floor(bot.entity.position.x + ux * ahead);
     const z = Math.floor(bot.entity.position.z + uz * ahead);
-    const block = bot.blockAt(new Vec3(x, base.y, z));
+    const feet = bot.blockAt(new Vec3(x, base.y, z));
     const head = bot.blockAt(new Vec3(x, base.y + 1, z));
-    const aboveHead = bot.blockAt(new Vec3(x, base.y + 2, z));
+    const over = bot.blockAt(new Vec3(x, base.y + 2, z));
 
     if (
-      block && block.boundingBox !== 'empty' &&
+      feet && feet.boundingBox !== 'empty' &&
       head && head.boundingBox === 'empty' &&
-      aboveHead && aboveHead.boundingBox === 'empty'
+      over && over.boundingBox === 'empty'
     ) {
-      obstacle = block;
+      obstacle = feet;
       break;
     }
   }
 
   if (!obstacle) return false;
 
-  const nearestBot = getNearestOtherBot(bot, 2.2);
-  if (nearestBot && isBotAhead(bot, nearestBot, 2.2)) return false;
+  // Never jump directly into another bot.
+  const nearestBot = getNearestOtherBot(bot, 1.9);
+  if (nearestBot && isBotAhead(bot, nearestBot, 1.9)) return false;
 
-  // Let Pathfinder keep its active goal. We only add a short jump input.
+  // Don't fight Pathfinder for forward/sprint controls. Only add jump input.
   bot._lastManualJumpAt = now;
   bot._manualJumping = true;
 
   try {
-    bot.setControlState('forward', true);
-    bot.setControlState('sprint', true);
     bot.setControlState('jump', true);
   } catch (_) {}
 
   setTimeout(() => {
-    try {
-      bot.setControlState('jump', false);
-      bot.setControlState('forward', false);
-      bot.setControlState('sprint', false);
-    } catch (_) {}
+    try { bot.setControlState('jump', false); } catch (_) {}
     bot._manualJumping = false;
-  }, 450);
+  }, 300);
 
   return true;
 }
@@ -1714,7 +1708,7 @@ function initializeBotState(bot) {
     if (!bot.entity || !bot.pathfinder.isMoving()) return;
 
     const now = Date.now();
-    if (now - (bot._lastPhysicsCheckAt || 0) < 500) return;
+    if (now - (bot._lastPhysicsCheckAt || 0) < 180) return;
     bot._lastPhysicsCheckAt = now;
 
     // Apply the same one-block jump assistance to follow, come, goto, mine and dig.
